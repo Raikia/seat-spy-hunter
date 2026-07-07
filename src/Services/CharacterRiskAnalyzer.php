@@ -9,7 +9,6 @@ use Seat\Eveapi\Models\RefreshToken;
 use Seat\Eveapi\Models\Character\CharacterInfo;
 use Seat\Eveapi\Models\Contacts\CharacterContact;
 use Seat\Eveapi\Models\Mail\MailHeader;
-use Seat\Eveapi\Models\Mail\MailRecipient;
 use Seat\Eveapi\Models\Wallet\CharacterWalletJournal;
 use Seat\Eveapi\Models\Wallet\CharacterWalletTransaction;
 use Seat\Web\Models\User;
@@ -130,10 +129,10 @@ class CharacterRiskAnalyzer
             return;
         }
 
-        $sentByHostiles = MailRecipient::query()
-            ->where('recipient_id', $character->character_id)
-            ->whereHas('mail', function ($query) use ($hostileEntityIds) {
-                $query->whereIn('from', $hostileEntityIds->all());
+        $sentByHostiles = MailHeader::query()
+            ->whereIn('from', $hostileEntityIds->all())
+            ->whereHas('recipients', function ($query) use ($character) {
+                $query->where('recipient_id', $character->character_id);
             });
 
         $sentToHostiles = MailHeader::query()
@@ -149,7 +148,7 @@ class CharacterRiskAnalyzer
         $metrics['hostile_mail_count'] = $total;
 
         if ($total > 0) {
-            $latestReceived = (clone $sentByHostiles)->with('mail.sender')->latest('created_at')->take(5)->get();
+            $latestReceived = (clone $sentByHostiles)->with('sender')->orderByDesc('timestamp')->take(5)->get();
             $latestSent = (clone $sentToHostiles)->with('recipients.entity')->orderByDesc('timestamp')->take(5)->get();
 
             $direction = $sentCount > 0 && $receivedCount > 0 ? 'bidirectional' : ($sentCount > 0 ? 'outbound' : 'inbound');
@@ -168,12 +167,12 @@ class CharacterRiskAnalyzer
                     'direction' => $direction,
                     'received' => $receivedCount,
                     'sent' => $sentCount,
-                    'latest_received' => $latestReceived->map(function ($recipient) {
+                    'latest_received' => $latestReceived->map(function ($mail) {
                         return [
-                            'mail_id' => $recipient->mail_id,
-                            'from' => optional(optional($recipient->mail)->sender)->name ?: optional($recipient->mail)->from,
-                            'subject' => optional($recipient->mail)->subject,
-                            'timestamp' => $this->dateTimeString(optional($recipient->mail)->timestamp),
+                            'mail_id' => $mail->mail_id,
+                            'from' => optional($mail->sender)->name ?: $mail->from,
+                            'subject' => $mail->subject,
+                            'timestamp' => $this->dateTimeString($mail->timestamp),
                         ];
                     })->values()->all(),
                     'latest_sent' => $latestSent->map(function ($mail) {

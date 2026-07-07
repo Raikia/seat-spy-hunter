@@ -67,7 +67,7 @@ The plugin adds these main areas:
 
 ## Installing In SeAT
 
-Install the package from your SeAT root:
+If the package has been published to Packagist, install it from your SeAT root:
 
 ```bash
 composer require raikia/seat-spy-hunter
@@ -75,6 +75,15 @@ php artisan migrate
 php artisan db:seed --class="Raikia\\SeatSpyHunter\\Database\\Seeders\\ScheduleSeeder"
 php artisan optimize:clear
 ```
+
+If it has not been published to Packagist yet, Composer needs to know where the Git repository lives before `composer require` will work. Add the repository to the SeAT app's `composer.json`, or run the equivalent Composer config command:
+
+```bash
+composer config repositories.seat-spy-hunter vcs https://github.com/raikia/seat-spy-hunter
+composer require raikia/seat-spy-hunter:dev-main
+```
+
+Without that repository entry, production installs that use `SEAT_PLUGINS=raikia/seat-spy-hunter` will fail with a Packagist 404 because Composer only knows to search Packagist.
 
 Then restart the SeAT services you normally run for web, workers, and scheduler.
 
