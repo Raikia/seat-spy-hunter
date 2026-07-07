@@ -133,9 +133,13 @@ The plugin ships a schedule seeder for three commands:
 
 The default intent is:
 
-- Refresh reports every two hours.
+- Queue a report refresh every two hours.
 - Process VPNAPI.io lookups once per day, shortly after the UTC reset.
-- Process EveWho hostile member pages every five minutes.
+- Process EveWho hostile member pages every five minutes, while throttling each hostile member's SeAT ESI refresh to about once per month.
+
+The cache page also has a button to force that monthly hostile-member ESI refresh early. It queues a background job that processes cached members in small delayed batches, and should be used sparingly, mostly after adding a new hostile group or when you know stale employment data needs to be refreshed.
+
+Report refreshes run as Laravel queue jobs. The dashboard refresh button and the scheduled command both enqueue the same unique job, so the web request and scheduler return quickly while the SeAT worker does the analysis.
 
 You can also run the commands manually:
 

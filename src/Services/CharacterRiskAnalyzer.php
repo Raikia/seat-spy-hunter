@@ -167,16 +167,19 @@ class CharacterRiskAnalyzer
                     'direction' => $direction,
                     'received' => $receivedCount,
                     'sent' => $sentCount,
-                    'latest_received' => $latestReceived->map(function ($mail) {
+                    'latest_received' => $latestReceived->map(function ($mail) use ($character) {
                         return [
+                            'character_id' => (int) $character->character_id,
                             'mail_id' => $mail->mail_id,
                             'from' => optional($mail->sender)->name ?: $mail->from,
+                            'from_id' => $mail->from,
                             'subject' => $mail->subject,
                             'timestamp' => $this->dateTimeString($mail->timestamp),
                         ];
                     })->values()->all(),
-                    'latest_sent' => $latestSent->map(function ($mail) {
+                    'latest_sent' => $latestSent->map(function ($mail) use ($character) {
                         return [
+                            'character_id' => (int) $character->character_id,
                             'mail_id' => $mail->mail_id,
                             'subject' => $mail->subject,
                             'timestamp' => $this->dateTimeString($mail->timestamp),
@@ -225,45 +228,78 @@ class CharacterRiskAnalyzer
                 ->where('second_party_id', $character->character_id)
                 ->whereIn('first_party_id', $hostileEntityIds->all())
                 ->count();
-            $direction = ($outgoingJournal + $transactions) > 0 && $incomingJournal > 0 ? 'bidirectional' : (($outgoingJournal + $transactions) > 0 ? 'outbound' : 'inbound_or_indirect');
+            $journalDirection = $outgoingJournal > 0 && $incomingJournal > 0 ? 'bidirectional' : ($outgoingJournal > 0 ? 'outbound' : 'inbound_or_indirect');
 
-            $evidence->push([
-                'category' => 'hostile_wallet',
-                'score' => min(40, 20 + ($total * 3) + (($outgoingJournal + $transactions) > 0 ? 5 : 0)),
-                'title' => 'Wallet activity with hostile entities',
-                'details' => sprintf('%s has %d wallet journal or market transaction match%s involving hostile entities. Direction: %s.',
-                    $character->name,
-                    $total,
-                    $total === 1 ? '' : 'es',
-                    $direction
-                ),
-                'meta' => [
-                    'direction' => $direction,
-                    'journal' => $journal,
-                    'transactions' => $transactions,
-                    'outgoing_journal' => $outgoingJournal,
-                    'incoming_journal' => $incomingJournal,
-                    'latest_journal' => $latestJournal->map(function ($entry) {
-                        return [
-                            'date' => $this->dateTimeString($entry->date),
-                            'amount' => (float) $entry->amount,
-                            'ref_type' => $entry->ref_type,
-                            'first_party' => optional($entry->first_party)->name ?: $entry->first_party_id,
-                            'second_party' => optional($entry->second_party)->name ?: $entry->second_party_id,
-                            'reason' => $entry->reason,
-                        ];
-                    })->values()->all(),
-                    'latest_transactions' => $latestTransactions->map(function ($transaction) {
-                        return [
-                            'date' => $this->dateTimeString($transaction->date),
-                            'total' => (float) $transaction->unit_price * (int) $transaction->quantity,
-                            'is_buy' => (bool) $transaction->is_buy,
-                            'party' => optional($transaction->party)->name ?: $transaction->client_id,
-                            'type' => optional($transaction->type)->typeName,
-                        ];
-                    })->values()->all(),
-                ],
-            ]);
+            if ($journal > 0) {
+                $evidence->push([
+                    'category' => 'hostile_wallet_direct',
+                    'score' => min(40, 22 + ($journal * 4) + ($outgoingJournal > 0 ? 5 : 0)),
+                    'title' => 'Direct wallet dealings with hostile entities',
+                    'details' => sprintf('%s has %d wallet journal match%s involving hostile entities. Direction: %s. Direct donations, trades, contracts, or transfers are stronger concern than open-market activity.',
+                        $character->name,
+                        $journal,
+                        $journal === 1 ? '' : 'es',
+                        $journalDirection
+                    ),
+                    'meta' => [
+                        'character_id' => (int) $character->character_id,
+                        'direction' => $journalDirection,
+                        'journal' => $journal,
+                        'outgoing_journal' => $outgoingJournal,
+                        'incoming_journal' => $incomingJournal,
+                        'latest_journal' => $latestJournal->map(function ($entry) {
+                            return [
+                                'character_id' => (int) $entry->character_id,
+                                'journal_id' => $entry->id,
+                                'date' => $this->dateTimeString($entry->date),
+                                'amount' => (float) $entry->amount,
+                                'ref_type' => $entry->ref_type,
+                                'first_party_id' => $entry->first_party_id,
+                                'second_party_id' => $entry->second_party_id,
+                                'first_party' => optional($entry->first_party)->name ?: $entry->first_party_id,
+                                'second_party' => optional($entry->second_party)->name ?: $entry->second_party_id,
+                                'reason' => $entry->reason,
+                            ];
+                        })->values()->all(),
+                    ],
+                ]);
+            }
+
+            if ($transactions > 0) {
+                $buyCount = (clone $transactionQuery)->where('is_buy', true)->count();
+                $sellCount = (clone $transactionQuery)->where('is_buy', false)->count();
+
+                $evidence->push([
+                    'category' => 'hostile_market_transaction',
+                    'score' => min(18, 6 + ($transactions * 2)),
+                    'title' => 'Market transactions with hostile entities',
+                    'details' => sprintf('%s has %d market transaction match%s involving hostile entities. This is lower concern because open-market trades may be incidental.',
+                        $character->name,
+                        $transactions,
+                        $transactions === 1 ? '' : 'es'
+                    ),
+                    'meta' => [
+                        'character_id' => (int) $character->character_id,
+                        'transactions' => $transactions,
+                        'buy_count' => $buyCount,
+                        'sell_count' => $sellCount,
+                        'latest_transactions' => $latestTransactions->map(function ($transaction) {
+                            return [
+                                'character_id' => (int) $transaction->character_id,
+                                'transaction_id' => $transaction->transaction_id,
+                                'date' => $this->dateTimeString($transaction->date),
+                                'total' => (float) $transaction->unit_price * (int) $transaction->quantity,
+                                'unit_price' => (float) $transaction->unit_price,
+                                'quantity' => (int) $transaction->quantity,
+                                'is_buy' => (bool) $transaction->is_buy,
+                                'client_id' => $transaction->client_id,
+                                'party' => optional($transaction->party)->name ?: $transaction->client_id,
+                                'type' => optional($transaction->type)->typeName,
+                            ];
+                        })->values()->all(),
+                    ],
+                ]);
+            }
         }
     }
 

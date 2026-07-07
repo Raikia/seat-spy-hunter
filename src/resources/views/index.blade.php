@@ -83,7 +83,7 @@
 
     <div class="card">
         <div class="card-body table-responsive p-0">
-            <table class="table table-hover mb-0">
+            <table id="spy-hunter-reports-table" class="table table-hover mb-0">
                 <thead>
                     <tr>
                         <th>User Account</th>
@@ -104,7 +104,7 @@
                             $accountCharacters = data_get(optional($report->evidence->firstWhere('category', 'account_characters'))->meta, 'characters', []);
                         @endphp
                         <tr>
-                            <td>
+                            <td data-order="{{ strtolower($report->character_name ?: ('user ' . $accountUserId)) }}">
                                 <a href="{{ route('seatcore::configuration.users.edit', ['user_id' => $accountUserId]) }}">
                                     <strong>{{ $report->character_name ?: ('User #' . $accountUserId) }}</strong>
                                 </a><br>
@@ -114,7 +114,7 @@
                                     <span class="badge badge-{{ $reviewBadge }}">{{ ucfirst($report->review_status ?: 'new') }}</span>
                                 </div>
                             </td>
-                            <td>
+                            <td data-order="{{ count($accountCharacters) }}">
                                 @forelse(array_slice($accountCharacters, 0, 3) as $character)
                                     <div>
                                         <a href="{{ route('seatcore::character.view.sheet', ['character' => $character['character_id']]) }}">
@@ -131,26 +131,26 @@
                                     <small class="text-muted">+{{ count($accountCharacters) - 3 }} more</small>
                                 @endif
                             </td>
-                            <td>
+                            <td data-order="{{ strtolower(($report->corporation_name ?: $report->corporation_id) . ' ' . ($report->alliance_name ?: $report->alliance_id)) }}">
                                 {{ $report->corporation_name ?: $report->corporation_id }}<br>
                                 <small class="text-muted">{{ $report->alliance_name ?: ($report->alliance_id ?: 'No alliance') }}</small>
                             </td>
-                            <td>
+                            <td data-order="{{ $report->score }}">
                                 @php($badge = ['critical' => 'danger', 'high' => 'warning', 'watch' => 'info', 'clear' => 'success'][$report->rating] ?? 'secondary')
                                 <span class="badge badge-{{ $badge }}">{{ ucfirst($report->rating) }}</span>
                                 <div class="small text-muted">{{ $report->score }}/100</div>
                             </td>
-                            <td>{{ $report->evidence_count }}</td>
-                            <td>
+                            <td data-order="{{ $report->evidence_count }}">{{ $report->evidence_count }}</td>
+                            <td data-order="{{ $report->hostile_contact_count + $report->hostile_mail_count + $report->hostile_wallet_count }}">
                                 <span class="small">Contacts {{ $report->hostile_contact_count }}</span><br>
                                 <span class="small">Mail {{ $report->hostile_mail_count }}</span><br>
                                 <span class="small">Wallet {{ $report->hostile_wallet_count }}</span>
                             </td>
-                            <td>
+                            <td data-order="{{ $report->shared_ip_user_count + $report->vpn_ip_count }}">
                                 <span class="small">Shared users {{ $report->shared_ip_user_count }}</span><br>
                                 <span class="small">VPN/proxy {{ $report->vpn_ip_count }}</span>
                             </td>
-                            <td>
+                            <td data-order="{{ $report->skillpoints ?: 0 }}">
                                 {{ $report->skillpoints !== null ? number_format($report->skillpoints) : 'Unknown' }}<br>
                                 <small class="text-muted">{{ count($accountCharacters) }} monitored character{{ count($accountCharacters) === 1 ? '' : 's' }}</small>
                             </td>
@@ -170,14 +170,24 @@
                 </tbody>
             </table>
         </div>
-        @if($reports->hasPages())
-            <div class="card-footer">
-                {{ $reports->links() }}
-            </div>
-        @endif
     </div>
 
     @foreach($reports as $report)
         @include('seat-spy-hunter::partials.report-modal', ['report' => $report])
     @endforeach
 @endsection
+
+@push('javascript')
+    <script>
+        $(function () {
+            $('#spy-hunter-reports-table').DataTable({
+                order: [[3, 'desc']],
+                pageLength: 50,
+                lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
+                columnDefs: [
+                    { orderable: false, targets: [8] }
+                ]
+            });
+        });
+    </script>
+@endpush

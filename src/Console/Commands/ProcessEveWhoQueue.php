@@ -9,7 +9,7 @@ class ProcessEveWhoQueue extends Command
 {
     protected $signature = 'seat-spy-hunter:evewho-sync {--limit=10 : Maximum EveWho list pages to process.}';
 
-    protected $description = 'Process queued EveWho hostile membership lookups and queue SeAT ESI character history jobs.';
+    protected $description = 'Process queued EveWho hostile membership lookups and queue monthly SeAT ESI character history refreshes.';
 
     public function handle(EveWhoService $eveWho): int
     {

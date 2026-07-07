@@ -13,6 +13,14 @@ use Seat\Eveapi\Bus\Character as CharacterBus;
 
 class EveWhoService
 {
+    private const STARTER_NPC_CORPORATION_IDS = [
+        1000166, // Imperial Academy
+        1000167, // State War Academy
+        1000168, // Federal Navy Academy
+        1000170, // Republic Military School
+        1000045, // Science and Trade Institute
+    ];
+
     public function queueConfiguredHostiles(): void
     {
         IntelEntity::query()
@@ -88,13 +96,62 @@ class EveWhoService
         return $processed;
     }
 
+    public function queueCachedMemberEsiRefresh(bool $force = false, int $afterId = 0, int $limit = 25): array
+    {
+        $queued = 0;
+        $lastId = null;
+        $limit = max(1, min($limit, 100));
+
+        $members = EveWhoMember::query()
+            ->whereNotNull('character_id')
+            ->where('id', '>', $afterId)
+            ->when(!$force, function ($query) {
+                $query->where(function ($inner) {
+                    $inner->whereNull('esi_queued_at')
+                        ->orWhere('esi_queued_at', '<=', now()->subDays(30));
+                });
+            })
+            ->orderBy('id')
+            ->limit($limit)
+            ->get();
+
+        foreach ($members as $member) {
+            $lastId = (int) $member->id;
+
+            if ($this->queueMemberEsi($member, $force)) {
+                $queued++;
+            }
+        }
+
+        $hasMore = $lastId !== null && EveWhoMember::query()
+            ->whereNotNull('character_id')
+            ->where('id', '>', $lastId)
+            ->when(!$force, function ($query) {
+                $query->where(function ($inner) {
+                    $inner->whereNull('esi_queued_at')
+                        ->orWhere('esi_queued_at', '<=', now()->subDays(30));
+                });
+            })
+            ->exists();
+
+        return [
+            'queued' => $queued,
+            'last_id' => $lastId,
+            'has_more' => $hasMore,
+        ];
+    }
+
     public function hostileEmploymentOverlaps(Collection $characterIds): Collection
     {
         if ($characterIds->isEmpty()) {
             return collect();
         }
 
-        $localHistories = $this->localEmploymentHistories($characterIds);
+        $ignoredCorporationIds = $this->ignoredEmploymentCorporationIds();
+        $localHistories = $this->localEmploymentHistories($characterIds)
+            ->reject(fn ($row) => $ignoredCorporationIds->contains((int) $row->corporation_id))
+            ->values();
+
         if ($localHistories->isEmpty()) {
             return collect();
         }
@@ -120,7 +177,10 @@ class EveWhoService
             ->get()
             ->groupBy('character_id');
 
-        $hostileHistories = $this->employmentHistories($hostileCharacterIds, $corporationIds);
+        $hostileHistories = $this->employmentHistories($hostileCharacterIds, $corporationIds)
+            ->reject(fn ($row) => $ignoredCorporationIds->contains((int) $row->corporation_id))
+            ->values();
+
         if ($hostileHistories->isEmpty()) {
             return collect();
         }
@@ -193,18 +253,22 @@ class EveWhoService
         ]);
     }
 
-    private function queueMemberEsi(EveWhoMember $member): void
+    private function queueMemberEsi(EveWhoMember $member, bool $force = false): bool
     {
-        if ($member->esi_queued_at && $member->esi_queued_at->gt(now()->subDays(7))) {
-            return;
+        if (!$force && $member->esi_queued_at && $member->esi_queued_at->gt(now()->subDays(30))) {
+            return false;
         }
 
         try {
             (new CharacterBus((int) $member->character_id))->fire();
             $member->forceFill(['esi_queued_at' => now()])->save();
+
+            return true;
         } catch (\Throwable $exception) {
             report($exception);
         }
+
+        return false;
     }
 
     private function charactersFromListPayload(array $payload): Collection
@@ -257,6 +321,61 @@ class EveWhoService
         }
 
         return $histories;
+    }
+
+    private function ignoredEmploymentCorporationIds(): Collection
+    {
+        return collect(self::STARTER_NPC_CORPORATION_IDS)
+            ->merge($this->monitoredCorporationIds())
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+    }
+
+    private function monitoredCorporationIds(): Collection
+    {
+        $entities = IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_MONITORED)
+            ->get();
+
+        $corporationIds = $entities
+            ->where('entity_type', 'corporation')
+            ->pluck('entity_id')
+            ->map(fn ($id) => (int) $id);
+        $allianceIds = $entities
+            ->where('entity_type', 'alliance')
+            ->pluck('entity_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->values();
+
+        if ($allianceIds->isEmpty()) {
+            return $corporationIds->filter()->unique()->values();
+        }
+
+        $allianceCorporationIds = collect();
+
+        if (Schema::hasTable('alliance_members') && Schema::hasColumn('alliance_members', 'alliance_id') && Schema::hasColumn('alliance_members', 'corporation_id')) {
+            $allianceCorporationIds = DB::table('alliance_members')
+                ->whereIn('alliance_id', $allianceIds->all())
+                ->pluck('corporation_id')
+                ->map(fn ($id) => (int) $id);
+        }
+
+        if ($allianceCorporationIds->isEmpty() && Schema::hasTable('character_affiliations')) {
+            $allianceCorporationIds = DB::table('character_affiliations')
+                ->whereIn('alliance_id', $allianceIds->all())
+                ->whereNotNull('corporation_id')
+                ->pluck('corporation_id')
+                ->map(fn ($id) => (int) $id);
+        }
+
+        return $corporationIds
+            ->merge($allianceCorporationIds)
+            ->filter()
+            ->unique()
+            ->values();
     }
 
     private function corporationNames(Collection $corporationIds): Collection

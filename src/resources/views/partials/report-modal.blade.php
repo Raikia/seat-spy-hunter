@@ -23,6 +23,8 @@
         'hostile_employment_overlap' => 'Hostile Employment Overlap',
         'hostile_mail' => 'Hostile Mail',
         'hostile_wallet' => 'Hostile Wallet',
+        'hostile_wallet_direct' => 'Direct Wallet',
+        'hostile_market_transaction' => 'Market Trade',
         'shared_ip' => 'Shared IP',
         'vpn_ip' => 'VPN / Proxy',
         'missing_token' => 'Missing Token',
@@ -58,6 +60,8 @@
         'hostile_employment_overlap' => 'danger',
         'hostile_mail' => 'danger',
         'hostile_wallet' => 'danger',
+        'hostile_wallet_direct' => 'danger',
+        'hostile_market_transaction' => 'warning',
         'shared_ip' => 'warning',
         'vpn_ip' => 'warning',
         'missing_token' => 'dark',
@@ -377,6 +381,138 @@
                                 </table>
                             </div>
                         @endif
+                        @if($evidence->category === 'hostile_mail')
+                            @php($mailRows = collect(data_get($evidence->meta, 'latest_received', []))->map(fn($row) => array_merge($row, ['direction' => 'Received']))->merge(collect(data_get($evidence->meta, 'latest_sent', []))->map(fn($row) => array_merge($row, ['direction' => 'Sent']))))
+                            @if($mailRows->isNotEmpty())
+                                <div class="table-responsive mb-2">
+                                    <table class="table table-sm table-bordered mb-0">
+                                        <thead>
+                                        <tr>
+                                            <th>Direction</th>
+                                            <th>Subject</th>
+                                            <th>Counterparty</th>
+                                            <th>Sent</th>
+                                            <th></th>
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                        @foreach($mailRows as $mail)
+                                            <tr>
+                                                <td>{{ data_get($mail, 'direction') }}</td>
+                                                <td>{{ data_get($mail, 'subject') ?: 'No subject' }}</td>
+                                                <td>
+                                                    @if(data_get($mail, 'direction') === 'Received')
+                                                        {{ data_get($mail, 'from') ?: data_get($mail, 'from_id', 'Unknown') }}
+                                                    @else
+                                                        {{ implode(', ', data_get($mail, 'recipients', [])) ?: 'Unknown' }}
+                                                    @endif
+                                                </td>
+                                                <td>{{ data_get($mail, 'timestamp') ?: 'Unknown' }}</td>
+                                                <td class="text-right">
+                                                    @if(data_get($mail, 'character_id') && data_get($mail, 'mail_id'))
+                                                        <a class="btn btn-xs btn-outline-primary" href="{{ route('seatcore::character.view.mail.read', ['character' => data_get($mail, 'character_id'), 'message_id' => data_get($mail, 'mail_id')]) }}">
+                                                            <i class="fas fa-envelope-open-text"></i> Open Mail
+                                                        </a>
+                                                    @elseif(data_get($mail, 'character_id'))
+                                                        <a class="btn btn-xs btn-outline-secondary" href="{{ route('seatcore::character.view.mail', ['character' => data_get($mail, 'character_id')]) }}">
+                                                            <i class="fas fa-envelope"></i> Mail
+                                                        </a>
+                                                    @endif
+                                                </td>
+                                            </tr>
+                                        @endforeach
+                                        </tbody>
+                                    </table>
+                                </div>
+                            @endif
+                        @endif
+                        @if(in_array($evidence->category, ['hostile_wallet', 'hostile_wallet_direct']) && !empty(data_get($evidence->meta, 'latest_journal')))
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Ref Type</th>
+                                        <th>Parties</th>
+                                        <th>Amount</th>
+                                        <th>Reason</th>
+                                        <th></th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    @foreach(data_get($evidence->meta, 'latest_journal', []) as $entry)
+                                        <tr>
+                                            <td>{{ data_get($entry, 'date') ?: 'Unknown' }}</td>
+                                            <td>{{ data_get($entry, 'ref_type') ?: 'Unknown' }}</td>
+                                            <td>
+                                                {{ data_get($entry, 'first_party') ?: data_get($entry, 'first_party_id', 'Unknown') }}
+                                                <span class="text-muted">→</span>
+                                                {{ data_get($entry, 'second_party') ?: data_get($entry, 'second_party_id', 'Unknown') }}
+                                            </td>
+                                            <td>{{ number_format((float) data_get($entry, 'amount', 0), 2) }} ISK</td>
+                                            <td>{{ data_get($entry, 'reason') ?: '-' }}</td>
+                                            <td class="text-right">
+                                                @if(data_get($entry, 'character_id'))
+                                                    <a class="btn btn-xs btn-outline-primary" href="{{ route('seatcore::character.view.journal', ['character' => data_get($entry, 'character_id')]) }}">
+                                                        <i class="fas fa-wallet"></i> Journal
+                                                    </a>
+                                                    @if(data_get($entry, 'first_party_id') && data_get($entry, 'second_party_id') && data_get($entry, 'ref_type'))
+                                                        <a class="btn btn-xs btn-outline-secondary" href="{{ route('seatcore::character.view.intel.summary.journal.details', ['character' => data_get($entry, 'character_id'), 'first_party_id' => data_get($entry, 'first_party_id'), 'second_party_id' => data_get($entry, 'second_party_id'), 'ref_type' => data_get($entry, 'ref_type')]) }}">
+                                                            <i class="fas fa-search"></i> Detail
+                                                        </a>
+                                                    @endif
+                                                @endif
+                                            </td>
+                                        </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        @endif
+                        @if(in_array($evidence->category, ['hostile_wallet', 'hostile_market_transaction']) && !empty(data_get($evidence->meta, 'latest_transactions')))
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Side</th>
+                                        <th>Item</th>
+                                        <th>Party</th>
+                                        <th>Total</th>
+                                        <th></th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    @foreach(data_get($evidence->meta, 'latest_transactions', []) as $transaction)
+                                        <tr>
+                                            <td>{{ data_get($transaction, 'date') ?: 'Unknown' }}</td>
+                                            <td>{{ data_get($transaction, 'is_buy') ? 'Buy' : 'Sell' }}</td>
+                                            <td>
+                                                {{ data_get($transaction, 'type') ?: 'Unknown item' }}
+                                                @if(data_get($transaction, 'quantity'))
+                                                    <div class="small text-muted">Qty {{ number_format((int) data_get($transaction, 'quantity')) }}</div>
+                                                @endif
+                                            </td>
+                                            <td>{{ data_get($transaction, 'party') ?: data_get($transaction, 'client_id', 'Unknown') }}</td>
+                                            <td>{{ number_format((float) data_get($transaction, 'total', 0), 2) }} ISK</td>
+                                            <td class="text-right">
+                                                @if(data_get($transaction, 'character_id'))
+                                                    <a class="btn btn-xs btn-outline-primary" href="{{ route('seatcore::character.view.transactions', ['character' => data_get($transaction, 'character_id')]) }}">
+                                                        <i class="fas fa-exchange-alt"></i> Transactions
+                                                    </a>
+                                                    @if(data_get($transaction, 'client_id'))
+                                                        <a class="btn btn-xs btn-outline-secondary" href="{{ route('seatcore::character.view.intel.summary.transactions.details', ['character' => data_get($transaction, 'character_id'), 'client_id' => data_get($transaction, 'client_id')]) }}">
+                                                            <i class="fas fa-search"></i> Detail
+                                                        </a>
+                                                    @endif
+                                                @endif
+                                            </td>
+                                        </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        @endif
                         @if($evidence->category === 'hostile_employment_overlap' && !empty(data_get($evidence->meta, 'matches')))
                             <div class="mb-2">
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_time_count', 0) }} same-time</span>
@@ -436,6 +572,46 @@
                                                 @endif
                                             </td>
                                         </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        @endif
+                        @if($evidence->category === 'shared_user_agent' && !empty(data_get($evidence->meta, 'shared_users')))
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead>
+                                    <tr>
+                                        <th>User</th>
+                                        <th>Matched User Agent</th>
+                                        <th>Last Seen</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    @foreach(data_get($evidence->meta, 'shared_users', []) as $sharedUser)
+                                        @forelse(data_get($sharedUser, 'user_agents', []) as $agent)
+                                            <tr>
+                                                <td>
+                                                    <a href="{{ route('seatcore::configuration.users.edit', ['user_id' => data_get($sharedUser, 'user_id')]) }}">
+                                                        User #{{ data_get($sharedUser, 'user_id') }}
+                                                    </a>
+                                                </td>
+                                                <td>
+                                                    <code class="small text-wrap" style="white-space: normal;">{{ data_get($agent, 'user_agent') }}</code>
+                                                </td>
+                                                <td>{{ data_get($agent, 'last_seen_at') ?: data_get($sharedUser, 'last_seen_at', 'Unknown') }}</td>
+                                            </tr>
+                                        @empty
+                                            <tr>
+                                                <td>
+                                                    <a href="{{ route('seatcore::configuration.users.edit', ['user_id' => data_get($sharedUser, 'user_id')]) }}">
+                                                        User #{{ data_get($sharedUser, 'user_id') }}
+                                                    </a>
+                                                </td>
+                                                <td><span class="text-muted">Matched user agent not captured</span></td>
+                                                <td>{{ data_get($sharedUser, 'last_seen_at', 'Unknown') }}</td>
+                                            </tr>
+                                        @endforelse
                                     @endforeach
                                     </tbody>
                                 </table>

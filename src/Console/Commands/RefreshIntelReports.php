@@ -3,19 +3,19 @@
 namespace Raikia\SeatSpyHunter\Console\Commands;
 
 use Illuminate\Console\Command;
-use Raikia\SeatSpyHunter\Services\IntelReportRefresher;
+use Raikia\SeatSpyHunter\Jobs\RefreshIntelReportsJob;
 
 class RefreshIntelReports extends Command
 {
     protected $signature = 'seat-spy-hunter:refresh';
 
-    protected $description = 'Refresh read-only SeAT Spy Hunter account risk reports.';
+    protected $description = 'Queue a refresh of read-only SeAT Spy Hunter account risk reports.';
 
-    public function handle(IntelReportRefresher $refresher): int
+    public function handle(): int
     {
-        $count = $refresher->refresh();
+        RefreshIntelReportsJob::dispatch();
 
-        $this->info($count . ' account spy hunter report' . ($count === 1 ? '' : 's') . ' refreshed.');
+        $this->info('Spy Hunter report refresh queued.');
 
         return self::SUCCESS;
     }

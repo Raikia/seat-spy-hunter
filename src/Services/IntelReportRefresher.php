@@ -574,6 +574,16 @@ class IntelReportRefresher
             return;
         }
 
+        $matchedAgents = DB::table('user_login_histories')
+            ->whereIn('user_id', $sharedUsers->pluck('user_id')->all())
+            ->whereIn('user_agent', $agents->all())
+            ->whereNotNull('user_agent')
+            ->where('user_agent', '<>', '')
+            ->select('user_id', 'user_agent', DB::raw('max(created_at) as last_seen_at'))
+            ->groupBy('user_id', 'user_agent')
+            ->get()
+            ->groupBy('user_id');
+
         $evidence->push([
             'category' => 'shared_user_agent',
             'score' => min(25, 10 + (($sharedUsers->count() - 1) * 3)),
@@ -588,6 +598,14 @@ class IntelReportRefresher
                     'user_id' => (int) $row->user_id,
                     'shared_agent_count' => (int) $row->shared_agent_count,
                     'last_seen_at' => $this->dateString($row->last_seen_at),
+                    'user_agents' => $matchedAgents
+                        ->get($row->user_id, collect())
+                        ->map(fn ($agent) => [
+                            'user_agent' => $agent->user_agent,
+                            'last_seen_at' => $this->dateString($agent->last_seen_at),
+                        ])
+                        ->values()
+                        ->all(),
                 ])->values()->all(),
             ],
         ]);

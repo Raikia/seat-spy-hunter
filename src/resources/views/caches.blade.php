@@ -113,10 +113,18 @@
     <div class="card">
         <div class="card-header">
             <h3 class="card-title"><i class="fas fa-users mr-1"></i> EveWho Member Cache</h3>
+            <div class="card-tools">
+                <form method="POST" action="{{ route('seat-spy-hunter.caches.evewho.refresh-esi') }}" class="d-inline">
+                    {{ csrf_field() }}
+                    <button type="submit" class="btn btn-sm btn-outline-primary">
+                        <i class="fas fa-sync-alt"></i> Force Monthly ESI Refresh
+                    </button>
+                </form>
+            </div>
         </div>
         <div class="card-body">
             <div class="alert alert-info">
-                EveWho is only used here to cache current hostile corporation or alliance members. Corporation history comes from SeAT's normal ESI character jobs after those members are discovered.
+                EveWho is only used here to cache current hostile corporation or alliance members. Corporation history comes from SeAT's normal ESI character jobs after those members are discovered. Hostile-member ESI refreshes are throttled to roughly once per month per character unless you force a refresh; forced refreshes run in small delayed batches.
             </div>
             <form method="GET" action="{{ route('seat-spy-hunter.caches') }}" class="form-row align-items-end mb-3">
                 <div class="form-group col-md-9">
@@ -143,21 +151,30 @@
                     </thead>
                     <tbody>
                         @forelse($eveWhoMembers as $member)
+                            @php
+                                $localAffiliation = $eveWhoMemberAffiliations->get((int) $member->character_id, []);
+                                $corporationId = $member->corporation_id ?: data_get($localAffiliation, 'corporation_id');
+                                $corporationName = $member->corporation_name ?: data_get($localAffiliation, 'corporation_name');
+                                $allianceId = $member->alliance_id ?: data_get($localAffiliation, 'alliance_id');
+                                $allianceName = $member->alliance_name ?: data_get($localAffiliation, 'alliance_name');
+                                $sourceKey = ($member->source_entity_type ?: 'unknown') . ':' . (int) $member->source_entity_id;
+                                $sourceName = $sourceEntityNames->get($sourceKey);
+                            @endphp
                             <tr>
                                 <td>
                                     {{ $member->character_name ?: $member->character_id }}
                                     <div class="small text-muted">{{ $member->character_id }}</div>
                                 </td>
                                 <td>
-                                    {{ $member->corporation_name ?: ($member->corporation_id ?: 'Unknown corporation') }}
-                                    @if($member->corporation_id)
-                                        <div class="small text-muted">{{ $member->corporation_id }}</div>
+                                    {{ $corporationName ?: ($corporationId ?: 'Unknown corporation') }}
+                                    @if($corporationId)
+                                        <div class="small text-muted">{{ $corporationId }}</div>
                                     @endif
-                                    @if($member->alliance_name || $member->alliance_id)
+                                    @if($allianceName || $allianceId)
                                         <div class="small">
-                                            {{ $member->alliance_name ?: $member->alliance_id }}
-                                            @if($member->alliance_id)
-                                                <span class="text-muted">({{ $member->alliance_id }})</span>
+                                            {{ $allianceName ?: $allianceId }}
+                                            @if($allianceId)
+                                                <span class="text-muted">({{ $allianceId }})</span>
                                             @endif
                                         </div>
                                     @endif
@@ -169,9 +186,9 @@
                                     {{ $member->esi_queued_at ? $member->esi_queued_at->toDateTimeString() : 'Not queued yet' }}
                                 </td>
                                 <td>
-                                    {{ ucfirst($member->source_entity_type ?: 'unknown') }}
+                                    {{ $sourceName ?: ucfirst($member->source_entity_type ?: 'unknown') }}
                                     @if($member->source_entity_id)
-                                        <div class="small text-muted">{{ $member->source_entity_id }}</div>
+                                        <div class="small text-muted">{{ ucfirst($member->source_entity_type ?: 'unknown') }} {{ $member->source_entity_id }}</div>
                                     @endif
                                 </td>
                                 <td class="text-right">

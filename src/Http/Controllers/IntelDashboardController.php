@@ -5,9 +5,9 @@ namespace Raikia\SeatSpyHunter\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Schema;
+use Raikia\SeatSpyHunter\Jobs\RefreshIntelReportsJob;
 use Raikia\SeatSpyHunter\Models\CharacterIntelReport;
 use Raikia\SeatSpyHunter\Models\FalsePositiveSuppression;
-use Raikia\SeatSpyHunter\Services\IntelReportRefresher;
 use Seat\Web\Http\Controllers\Controller;
 
 class IntelDashboardController extends Controller
@@ -39,8 +39,7 @@ class IntelDashboardController extends Controller
             })
             ->orderByDesc('score')
             ->orderBy('character_name')
-            ->paginate(50)
-            ->appends($request->only('rating', 'search'));
+            ->get();
 
         $lastAnalyzedAt = CharacterIntelReport::query()->max('last_analyzed_at');
         $summary = [
@@ -62,11 +61,11 @@ class IntelDashboardController extends Controller
         return view('seat-spy-hunter::show', compact('report'));
     }
 
-    public function refresh(IntelReportRefresher $refresher)
+    public function refresh()
     {
-        $count = $refresher->refresh();
+        RefreshIntelReportsJob::dispatch();
 
-        return redirect()->route('seat-spy-hunter.index')->with('success', $count . ' account spy hunter report' . ($count === 1 ? '' : 's') . ' refreshed.');
+        return redirect()->route('seat-spy-hunter.index')->with('success', 'Spy Hunter report refresh queued. The dashboard will update after the worker finishes processing it.');
     }
 
     public function updateReview(Request $request, CharacterIntelReport $report)
