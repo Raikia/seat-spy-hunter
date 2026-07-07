@@ -16,7 +16,8 @@
     },
     "autoload": {
         "psr-4": {
-            "Raikia\\SeatSpyHunter\\": "src/"
+            "Raikia\\SeatSpyHunter\\": "src/",
+            "Raikia\\SeatSpyHunter\\Database\\Seeders\\": "src/database/seeders/"
         }
     },
     "extra": {

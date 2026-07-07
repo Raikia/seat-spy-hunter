@@ -239,6 +239,10 @@ class IntelReportRefresher
 
     private function accountLoginIps(User $user): array
     {
+        if (!Schema::hasTable('user_login_histories')) {
+            return [];
+        }
+
         return DB::table('user_login_histories')
             ->where('user_id', $user->id)
             ->whereNotNull('source')
@@ -542,6 +546,10 @@ class IntelReportRefresher
 
     private function addSharedUserAgentEvidence(User $user, $evidence): void
     {
+        if (!Schema::hasTable('user_login_histories')) {
+            return;
+        }
+
         $agents = DB::table('user_login_histories')
             ->where('user_id', $user->id)
             ->whereNotNull('user_agent')
@@ -621,12 +629,12 @@ class IntelReportRefresher
         }
 
         $counts = [
-            'assets' => DB::table('character_assets')->whereIn('character_id', $characterIds->all())->count(),
-            'wallet_journal' => DB::table('character_wallet_journals')->whereIn('character_id', $characterIds->all())->count(),
-            'wallet_transactions' => DB::table('character_wallet_transactions')->whereIn('character_id', $characterIds->all())->count(),
-            'industry_jobs' => DB::table('character_industry_jobs')->whereIn('character_id', $characterIds->all())->count(),
-            'mining' => DB::table('character_minings')->whereIn('character_id', $characterIds->all())->count(),
-            'market_orders' => DB::table('character_orders')->whereIn('character_id', $characterIds->all())->count(),
+            'assets' => $this->countCharacterRows('character_assets', $characterIds),
+            'wallet_journal' => $this->countCharacterRows('character_wallet_journals', $characterIds),
+            'wallet_transactions' => $this->countCharacterRows('character_wallet_transactions', $characterIds),
+            'industry_jobs' => $this->countCharacterRows('character_industry_jobs', $characterIds),
+            'mining' => $this->countCharacterRows('character_minings', $characterIds),
+            'market_orders' => $this->countCharacterRows('character_orders', $characterIds),
         ];
 
         $activityCount = array_sum($counts);
@@ -842,6 +850,17 @@ class IntelReportRefresher
     private function allianceName($affiliation): ?string
     {
         return optional(optional($affiliation)->alliance)->name;
+    }
+
+    private function countCharacterRows(string $table, $characterIds): int
+    {
+        if (!Schema::hasTable($table) || !Schema::hasColumn($table, 'character_id')) {
+            return 0;
+        }
+
+        return (int) DB::table($table)
+            ->whereIn('character_id', $characterIds->all())
+            ->count();
     }
 
     private function dateString($value): ?string
