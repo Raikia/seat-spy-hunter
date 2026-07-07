@@ -1,0 +1,860 @@
+<?php
+
+namespace Raikia\SeatSpyHunter\Services;
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Raikia\SeatSpyHunter\Models\CharacterIntelReport;
+use Raikia\SeatSpyHunter\Models\FalsePositiveSuppression;
+use Raikia\SeatSpyHunter\Models\IntelEntity;
+use Seat\Eveapi\Models\Character\CharacterInfo;
+use Seat\Eveapi\Models\Wallet\CharacterWalletJournal;
+use Seat\Eveapi\Models\Wallet\CharacterWalletTransaction;
+use Seat\Web\Models\User;
+
+class IntelReportRefresher
+{
+    private $analyzer;
+    private $hostileContacts;
+    private $eveWho;
+
+    public function __construct(CharacterRiskAnalyzer $analyzer, HostileContactResolver $hostileContacts, EveWhoService $eveWho)
+    {
+        $this->analyzer = $analyzer;
+        $this->hostileContacts = $hostileContacts;
+        $this->eveWho = $eveWho;
+    }
+
+    public function refresh(): int
+    {
+        return DB::transaction(function () {
+            $hostileEntityIds = $this->hostileContacts->hostileEntityIds();
+            $characters = $this->monitoredCharacters();
+            $charactersByUser = $characters
+                ->filter(fn ($character) => optional($character->user)->id)
+                ->groupBy(fn ($character) => optional($character->user)->id);
+            $previousReviews = CharacterIntelReport::query()
+                ->get(['account_user_id', 'user_id', 'review_status', 'review_notes', 'reviewed_by', 'reviewed_at'])
+                ->keyBy(fn ($report) => (int) ($report->account_user_id ?: $report->user_id));
+            $count = 0;
+
+            $this->eveWho->queueConfiguredHostiles();
+            CharacterIntelReport::query()->delete();
+
+            foreach ($charactersByUser as $userId => $userCharacters) {
+                $user = User::find((int) $userId);
+
+                if (!$user) {
+                    continue;
+                }
+
+                $analyses = $userCharacters->map(function ($character) use ($hostileEntityIds) {
+                    return [
+                        'character' => $character,
+                        'analysis' => $this->analyzer->analyze($character, $hostileEntityIds),
+                    ];
+                })->reject(fn ($row) => $row['analysis']['ignored'])->values();
+
+                if ($analyses->isEmpty()) {
+                    continue;
+                }
+
+                $scoredCharacters = $analyses->pluck('character')->values();
+                $characterEvidence = $this->accountScopedCharacterEvidence($analyses);
+                $accountEvidence = $this->accountEvidence($user, $scoredCharacters, $hostileEntityIds);
+                $evidence = $characterEvidence->merge($accountEvidence)->values();
+                $suppressedCategories = $this->suppressedCategories((int) $user->id);
+                $suppressedEvidence = $evidence->filter(fn ($row) => $suppressedCategories->has($row['category']))->values();
+                $evidence = $evidence->reject(fn ($row) => $suppressedCategories->has($row['category']))->values();
+                $metrics = $this->accountMetrics($analyses);
+                $mitigation = $accountEvidence->sum(fn ($row) => (int) data_get($row, 'meta.mitigation_score', 0));
+                $score = min(100, max(0, (int) $evidence->sum('score') - $mitigation));
+                $primaryCharacter = $this->primaryCharacter($user, $scoredCharacters);
+                $affiliation = optional($primaryCharacter)->affiliation;
+                $previousReview = $previousReviews->get((int) $user->id);
+                $riskSignalCount = $evidence
+                    ->reject(fn ($row) => in_array($row['category'], ['account_connectors', 'multi_character_account']))
+                    ->where('score', '>', 0)
+                    ->count();
+
+                $reportAttributes = [
+                    'character_id' => $primaryCharacter ? (int) $primaryCharacter->character_id : null,
+                    'character_name' => $user->name,
+                    'corporation_id' => $primaryCharacter ? $this->corporationId($primaryCharacter) : null,
+                    'corporation_name' => $primaryCharacter ? $this->corporationName($primaryCharacter, $affiliation) : null,
+                    'alliance_id' => $this->allianceId($affiliation),
+                    'alliance_name' => $this->allianceName($affiliation),
+                    'user_id' => (int) $user->id,
+                    'score' => $score,
+                    'rating' => RiskRating::fromScore($score),
+                    'evidence_count' => $riskSignalCount,
+                    'hostile_contact_count' => $metrics['hostile_contact_count'],
+                    'hostile_mail_count' => $metrics['hostile_mail_count'],
+                    'hostile_wallet_count' => $metrics['hostile_wallet_count'],
+                    'shared_ip_user_count' => $metrics['shared_ip_user_count'],
+                    'vpn_ip_count' => $metrics['vpn_ip_count'],
+                    'skillpoints' => $scoredCharacters->sum(fn ($character) => (int) optional($character->skillpoints)->total_sp),
+                    'birthday' => $this->oldestBirthday($scoredCharacters),
+                    'last_analyzed_at' => now(),
+                    'review_status' => $previousReview ? $previousReview->review_status : 'new',
+                    'review_notes' => $previousReview ? $previousReview->review_notes : null,
+                    'reviewed_by' => $previousReview ? $previousReview->reviewed_by : null,
+                    'reviewed_at' => $previousReview ? $previousReview->reviewed_at : null,
+                ];
+
+                if (Schema::hasColumn('seat_spy_hunter_character_reports', 'account_user_id')) {
+                    $reportAttributes['account_user_id'] = (int) $user->id;
+                }
+
+                $report = CharacterIntelReport::create($reportAttributes);
+
+                $report->evidence()->create($this->accountCharactersEvidence($user, $scoredCharacters));
+
+                foreach ($evidence as $row) {
+                    $report->evidence()->create($row);
+                }
+
+                if ($suppressedEvidence->isNotEmpty()) {
+                    $report->evidence()->create($this->suppressedEvidenceContext($suppressedEvidence, $suppressedCategories));
+                }
+
+                $count++;
+            }
+
+            return $count;
+        });
+    }
+
+    private function accountMetrics($analyses): array
+    {
+        return [
+            'hostile_contact_count' => $analyses->sum(fn ($row) => $row['analysis']['metrics']['hostile_contact_count'] ?? 0),
+            'hostile_mail_count' => $analyses->sum(fn ($row) => $row['analysis']['metrics']['hostile_mail_count'] ?? 0),
+            'hostile_wallet_count' => $analyses->sum(fn ($row) => $row['analysis']['metrics']['hostile_wallet_count'] ?? 0),
+            'shared_ip_user_count' => $analyses->pluck('analysis.metrics.shared_ip_user_count')->max() ?: 0,
+            'vpn_ip_count' => $analyses->pluck('analysis.metrics.vpn_ip_count')->max() ?: 0,
+        ];
+    }
+
+    private function suppressedCategories(int $accountUserId)
+    {
+        return FalsePositiveSuppression::query()
+            ->active()
+            ->where('account_user_id', $accountUserId)
+            ->get(['category', 'reason'])
+            ->keyBy('category');
+    }
+
+    private function suppressedEvidenceContext($suppressedEvidence, $suppressedCategories): array
+    {
+        return [
+            'category' => 'suppressed_signals',
+            'score' => 0,
+            'title' => 'False-positive suppressions applied',
+            'details' => sprintf('%d evidence categor%s suppressed for this account.',
+                $suppressedEvidence->count(),
+                $suppressedEvidence->count() === 1 ? 'y was' : 'ies were'
+            ),
+            'meta' => [
+                'suppressed' => $suppressedEvidence->map(fn ($row) => [
+                    'category' => $row['category'],
+                    'title' => $row['title'],
+                    'score' => $row['score'],
+                    'reason' => optional($suppressedCategories->get($row['category']))->reason,
+                ])->values()->all(),
+            ],
+        ];
+    }
+
+    private function accountScopedCharacterEvidence($analyses)
+    {
+        $evidence = $analyses->pluck('analysis.evidence')->flatten(1)->values();
+        $accountSignalCategories = ['shared_ip', 'vpn_ip'];
+        $replacedByAccountCategories = ['low_skills', 'few_trained_skills'];
+        $accountSignals = collect();
+
+        foreach ($accountSignalCategories as $category) {
+            $signal = $evidence
+                ->where('category', $category)
+                ->sortByDesc('score')
+                ->first();
+
+            if ($signal) {
+                $accountSignals->push($signal);
+            }
+        }
+
+        return $evidence
+            ->reject(fn ($row) => in_array($row['category'], array_merge($accountSignalCategories, $replacedByAccountCategories)))
+            ->merge($accountSignals)
+            ->values();
+    }
+
+    private function primaryCharacter(User $user, $characters): ?CharacterInfo
+    {
+        return $characters->firstWhere('character_id', $user->main_character_id)
+            ?: $characters->sortByDesc(fn ($character) => (int) optional($character->skillpoints)->total_sp)->first();
+    }
+
+    private function oldestBirthday($characters): ?string
+    {
+        $birthday = $characters->pluck('birthday')->filter()->sort()->first();
+
+        return $birthday ?: null;
+    }
+
+    private function accountCharactersEvidence(User $user, $characters): array
+    {
+        return [
+            'category' => 'account_characters',
+            'score' => 0,
+            'title' => 'Monitored characters on this SeAT account',
+            'details' => sprintf('%s has %d monitored character%s included in this account-level score.',
+                $user->name,
+                $characters->count(),
+                $characters->count() === 1 ? '' : 's'
+            ),
+            'meta' => [
+                'user_id' => (int) $user->id,
+                'user_name' => $user->name,
+                'login_ips' => $this->accountLoginIps($user),
+                'characters' => $characters->map(function ($character) use ($user) {
+                    $affiliation = $character->affiliation;
+
+                    return [
+                        'character_id' => (int) $character->character_id,
+                        'name' => $character->name,
+                        'main' => (int) $user->main_character_id === (int) $character->character_id,
+                        'corporation_id' => $this->corporationId($character),
+                        'corporation_name' => $this->corporationName($character, $affiliation),
+                        'alliance_id' => $this->allianceId($affiliation),
+                        'alliance_name' => $this->allianceName($affiliation),
+                        'skillpoints' => optional($character->skillpoints)->total_sp,
+                        'birthday' => $this->dateString($character->birthday),
+                    ];
+                })->values()->all(),
+            ],
+        ];
+    }
+
+    private function accountLoginIps(User $user): array
+    {
+        return DB::table('user_login_histories')
+            ->where('user_id', $user->id)
+            ->whereNotNull('source')
+            ->where('source', '<>', '')
+            ->select('source', DB::raw('count(*) as login_count'), DB::raw('max(created_at) as last_seen_at'))
+            ->groupBy('source')
+            ->orderByDesc('last_seen_at')
+            ->get()
+            ->map(fn ($row) => [
+                'ip' => $row->source,
+                'login_count' => (int) $row->login_count,
+                'last_seen_at' => $this->dateString($row->last_seen_at),
+                'public' => $this->isPublicIp((string) $row->source),
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function accountEvidence(User $user, $characters, $hostileEntityIds)
+    {
+        $characterIds = $characters->pluck('character_id')->map(fn ($id) => (int) $id)->values();
+        $evidence = collect();
+
+        $connectorEvidence = $this->connectorEvidence($user);
+        if ($connectorEvidence) {
+            $evidence->push($connectorEvidence);
+        }
+
+        if ($characters->count() > 1) {
+            $mitigation = min(20, ($characters->count() - 1) * 8);
+            $evidence->push([
+                'category' => 'multi_character_account',
+                'score' => 0,
+                'title' => 'Multiple monitored characters linked',
+                'details' => sprintf('%s has %d monitored characters linked to the same SeAT account, reducing account-level concern by %d points.',
+                    $user->name,
+                    $characters->count(),
+                    $mitigation
+                ),
+                'meta' => [
+                    'character_count' => $characters->count(),
+                    'mitigation_score' => $mitigation,
+                ],
+            ]);
+        }
+
+        $totalSkillpoints = $characters->sum(fn ($character) => (int) optional($character->skillpoints)->total_sp);
+        if ($totalSkillpoints > 0 && $totalSkillpoints < 10000000) {
+            $evidence->push([
+                'category' => 'low_account_skillpoints',
+                'score' => 15,
+                'title' => 'Low account skillpoint footprint',
+                'details' => sprintf('%s has %s total monitored skillpoints, below the 10,000,000 account threshold.',
+                    $user->name,
+                    number_format($totalSkillpoints)
+                ),
+                'meta' => [
+                    'skillpoints' => $totalSkillpoints,
+                    'threshold' => 10000000,
+                ],
+            ]);
+        }
+
+        $this->addCorporationHistoryEvidence($user, $characterIds, $hostileEntityIds, $evidence);
+        $this->addSharedUserAgentEvidence($user, $evidence);
+        $this->addEmploymentOverlapEvidence($user, $characterIds, $evidence);
+        $this->addFootprintEvidence($user, $characters, $characterIds, $hostileEntityIds, $evidence);
+        $this->addWalletAccountEvidence($user, $characterIds, $evidence);
+
+        return $evidence;
+    }
+
+    private function connectorEvidence(User $user): ?array
+    {
+        if (!Schema::hasTable('seat_connector_users')) {
+            return null;
+        }
+
+        $connectors = DB::table('seat_connector_users')
+            ->where('user_id', $user->id)
+            ->orderBy('connector_type')
+            ->get(['connector_type', 'connector_name', 'name_override', 'connector_id', 'unique_id', 'updated_at'])
+            ->map(function ($connector) {
+                return [
+                    'type' => $connector->connector_type,
+                    'name' => $connector->name_override ?: $connector->connector_name,
+                    'connector_id' => $connector->connector_id,
+                    'unique_id' => $connector->unique_id,
+                    'updated_at' => $connector->updated_at,
+                ];
+            })
+            ->values();
+
+        return [
+            'category' => 'account_connectors',
+            'score' => 0,
+            'title' => 'External connector registrations',
+            'details' => sprintf('%s has %d external connector registration%s.',
+                $user->name,
+                $connectors->count(),
+                $connectors->count() === 1 ? '' : 's'
+            ),
+            'meta' => [
+                'connectors' => $connectors->all(),
+            ],
+        ];
+    }
+
+    private function addWalletAccountEvidence(User $user, $characterIds, $evidence): void
+    {
+        if ($characterIds->isEmpty()) {
+            return;
+        }
+
+        $pveWalletCount = CharacterWalletJournal::query()
+            ->whereIn('character_id', $characterIds->all())
+            ->where(function ($query) {
+                $query->where('ref_type', 'like', '%bounty%')
+                    ->orWhere('ref_type', 'like', '%mission%');
+            })
+            ->count();
+
+        if ($pveWalletCount === 0) {
+            $evidence->push([
+                'category' => 'no_pve_wallet_history',
+                'score' => 10,
+                'title' => 'No bounty or mission wallet history',
+                'details' => sprintf('%s has no monitored character wallet journal entries with bounty or mission reward references.', $user->name),
+                'meta' => [
+                    'ref_type_patterns' => ['%bounty%', '%mission%'],
+                ],
+            ]);
+        }
+
+        $recentSince = now()->subDays(30);
+        $recentJournalCount = CharacterWalletJournal::query()
+            ->whereIn('character_id', $characterIds->all())
+            ->where('date', '>=', $recentSince)
+            ->count();
+        $recentTransactionCount = CharacterWalletTransaction::query()
+            ->whereIn('character_id', $characterIds->all())
+            ->where('date', '>=', $recentSince)
+            ->count();
+        $recentWalletActivity = $recentJournalCount + $recentTransactionCount;
+
+        if ($recentWalletActivity <= 2) {
+            $evidence->push([
+                'category' => 'limited_recent_wallet_activity',
+                'score' => 10,
+                'title' => 'Limited recent wallet activity',
+                'details' => sprintf('%s has only %d wallet journal or market transaction rows across monitored characters in the last 30 days.',
+                    $user->name,
+                    $recentWalletActivity
+                ),
+                'meta' => [
+                    'since' => $recentSince->toDateString(),
+                    'journal_count' => $recentJournalCount,
+                    'transaction_count' => $recentTransactionCount,
+                ],
+            ]);
+        }
+
+        $balanceStats = CharacterWalletJournal::query()
+            ->whereIn('character_id', $characterIds->all())
+            ->whereNotNull('balance')
+            ->where('date', '>=', now()->subDays(90))
+            ->selectRaw('count(*) as samples, min(balance) as min_balance, max(balance) as max_balance')
+            ->first();
+
+        if ($balanceStats && (int) $balanceStats->samples >= 5) {
+            $minBalance = (float) $balanceStats->min_balance;
+            $maxBalance = (float) $balanceStats->max_balance;
+            $movement = $maxBalance - $minBalance;
+            $movementRatio = $maxBalance > 0 ? $movement / $maxBalance : 0;
+
+            if ($movement < 1000000 || $movementRatio < 0.05) {
+                $evidence->push([
+                    'category' => 'stable_wallet_balance',
+                    'score' => 8,
+                    'title' => 'Wallet balance shows little movement',
+                    'details' => sprintf('%s has a narrow wallet balance range across recent journal samples.', $user->name),
+                    'meta' => [
+                        'samples' => (int) $balanceStats->samples,
+                        'min_balance' => $minBalance,
+                        'max_balance' => $maxBalance,
+                        'movement' => $movement,
+                        'movement_ratio' => $movementRatio,
+                        'window_days' => 90,
+                    ],
+                ]);
+            }
+        }
+    }
+
+    private function addCorporationHistoryEvidence(User $user, $characterIds, $hostileEntityIds, $evidence): void
+    {
+        if ($characterIds->isEmpty() || !Schema::hasTable('character_corporation_histories')) {
+            return;
+        }
+
+        $histories = DB::table('character_corporation_histories')
+            ->whereIn('character_id', $characterIds->all())
+            ->where('is_deleted', false)
+            ->orderByDesc('start_date')
+            ->get(['character_id', 'corporation_id', 'start_date']);
+
+        $hostileCorpIds = $hostileEntityIds->map(fn ($id) => (int) $id)->flip();
+        $hostileHistories = $histories->filter(fn ($row) => $hostileCorpIds->has((int) $row->corporation_id));
+        $monitoredCorpIds = $this->monitoredCorporationIds()->flip();
+
+        if ($hostileHistories->isNotEmpty()) {
+            $evidence->push([
+                'category' => 'hostile_corporation_history',
+                'score' => min(30, 18 + (($hostileHistories->count() - 1) * 4)),
+                'title' => 'Past corporation overlap with hostile or negative contacts',
+                'details' => sprintf('%s has monitored characters with prior corporation history matching configured hostile or monitored negative-contact entities.', $user->name),
+                'meta' => [
+                    'matches' => $hostileHistories->take(10)->map(fn ($row) => [
+                        'character_id' => (int) $row->character_id,
+                        'corporation_id' => (int) $row->corporation_id,
+                        'start_date' => $this->dateString($row->start_date),
+                    ])->values()->all(),
+                ],
+            ]);
+        }
+
+        $recentUnmonitoredHistories = $histories->filter(function ($row) use ($monitoredCorpIds) {
+            return $row->start_date
+                && $row->start_date >= now()->subDays(180)->toDateString()
+                && !$monitoredCorpIds->has((int) $row->corporation_id);
+        });
+
+        if ($recentUnmonitoredHistories->isNotEmpty()) {
+            $evidence->push([
+                'category' => 'recent_neutral_corporation_history',
+                'score' => min(16, 8 + (($recentUnmonitoredHistories->count() - 1) * 2)),
+                'title' => 'Recent non-monitored corporation history',
+                'details' => sprintf('%s has recent corporation-history entries outside monitored corporations and known monitored-alliance member corporations.', $user->name),
+                'meta' => [
+                    'matches' => $recentUnmonitoredHistories->take(10)->map(fn ($row) => [
+                        'character_id' => (int) $row->character_id,
+                        'corporation_id' => (int) $row->corporation_id,
+                        'start_date' => $this->dateString($row->start_date),
+                    ])->values()->all(),
+                    'window_days' => 180,
+                ],
+            ]);
+        }
+
+        $historyCount = $histories->count();
+        $uniqueCorporationCount = $histories->pluck('corporation_id')->filter()->unique()->count();
+        $firstHistoryDate = $histories->pluck('start_date')->filter()->sort()->first();
+        $historyAgeDays = $firstHistoryDate ? max(1, now()->diffInDays($firstHistoryDate)) : null;
+        $historyAgeYears = $historyAgeDays ? max(1, $historyAgeDays / 365) : 1;
+        $expectedCorporations = max(2, (int) ceil($historyAgeYears * 2));
+        $excessCorporations = max(0, $uniqueCorporationCount - $expectedCorporations);
+        $recentHistoryCount = $histories->filter(function ($row) {
+            return $row->start_date && $row->start_date >= now()->subDays(180)->toDateString();
+        })->count();
+
+        if ($excessCorporations > 0 || $recentHistoryCount >= 3) {
+            $recentScore = $recentHistoryCount >= 3 ? min(4, $recentHistoryCount - 2) : 0;
+            $evidence->push([
+                'category' => 'corporation_history_churn',
+                'score' => min(20, 6 + ($excessCorporations * 2) + $recentScore),
+                'title' => 'Frequent corporation changes',
+                'details' => sprintf('%s has %d unique corporations across %s years of corporation history; rule of thumb allows about %d.',
+                    $user->name,
+                    $uniqueCorporationCount,
+                    number_format($historyAgeYears, 1),
+                    $expectedCorporations
+                ),
+                'meta' => [
+                    'history_count' => $historyCount,
+                    'unique_corporation_count' => $uniqueCorporationCount,
+                    'history_age_days' => $historyAgeDays,
+                    'history_age_years' => $historyAgeYears,
+                    'expected_corporations' => $expectedCorporations,
+                    'excess_corporations' => $excessCorporations,
+                    'recent_history_count' => $recentHistoryCount,
+                    'window_days' => 180,
+                ],
+            ]);
+        }
+
+        if ($historyCount > 0 && $recentHistoryCount === 0) {
+            $evidence->push([
+                'category' => 'quiet_corporation_history',
+                'score' => 3,
+                'title' => 'No recent corporation movement',
+                'details' => sprintf('%s has no corporation-history changes in the last 180 days. This is only a small contextual signal.', $user->name),
+                'meta' => [
+                    'history_count' => $historyCount,
+                    'unique_corporation_count' => $uniqueCorporationCount,
+                    'recent_history_count' => 0,
+                    'window_days' => 180,
+                ],
+            ]);
+        }
+    }
+
+    private function addSharedUserAgentEvidence(User $user, $evidence): void
+    {
+        $agents = DB::table('user_login_histories')
+            ->where('user_id', $user->id)
+            ->whereNotNull('user_agent')
+            ->where('user_agent', '<>', '')
+            ->pluck('user_agent')
+            ->unique()
+            ->values();
+
+        if ($agents->isEmpty()) {
+            return;
+        }
+
+        $sharedUsers = DB::table('user_login_histories')
+            ->whereIn('user_agent', $agents->all())
+            ->where('user_id', '<>', $user->id)
+            ->whereNotNull('user_id')
+            ->select('user_id', DB::raw('count(distinct user_agent) as shared_agent_count'), DB::raw('max(created_at) as last_seen_at'))
+            ->groupBy('user_id')
+            ->get();
+
+        if ($sharedUsers->isEmpty()) {
+            return;
+        }
+
+        $evidence->push([
+            'category' => 'shared_user_agent',
+            'score' => min(25, 10 + (($sharedUsers->count() - 1) * 3)),
+            'title' => 'Shares browser/device fingerprints with other SeAT users',
+            'details' => sprintf('%s has login user-agent strings also seen on %d other SeAT user account%s.',
+                $user->name,
+                $sharedUsers->count(),
+                $sharedUsers->count() === 1 ? '' : 's'
+            ),
+            'meta' => [
+                'shared_users' => $sharedUsers->map(fn ($row) => [
+                    'user_id' => (int) $row->user_id,
+                    'shared_agent_count' => (int) $row->shared_agent_count,
+                    'last_seen_at' => $this->dateString($row->last_seen_at),
+                ])->values()->all(),
+            ],
+        ]);
+    }
+
+    private function addEmploymentOverlapEvidence(User $user, $characterIds, $evidence): void
+    {
+        $overlaps = $this->eveWho->hostileEmploymentOverlaps($characterIds);
+
+        if ($overlaps->isEmpty()) {
+            return;
+        }
+
+        $sameTime = $overlaps->where('same_time', true);
+        $score = $sameTime->isNotEmpty()
+            ? min(45, 30 + (($sameTime->count() - 1) * 4))
+            : min(25, 12 + (($overlaps->count() - 1) * 2));
+
+        $evidence->push([
+            'category' => 'hostile_employment_overlap',
+            'score' => $score,
+            'title' => $sameTime->isNotEmpty() ? 'Employment overlap with hostile characters' : 'Historical corporation overlap with hostile characters',
+            'details' => sprintf('%s has employment history overlapping SeAT ESI histories for characters currently cached from hostile EveWho groups%s.',
+                $user->name,
+                $sameTime->isNotEmpty() ? ', including same-time corporation membership' : ''
+            ),
+            'meta' => [
+                'same_time_count' => $sameTime->count(),
+                'different_time_count' => $overlaps->count() - $sameTime->count(),
+                'matches' => $overlaps->take(20)->values()->all(),
+            ],
+        ]);
+    }
+
+    private function addFootprintEvidence(User $user, $characters, $characterIds, $hostileEntityIds, $evidence): void
+    {
+        if ($characterIds->isEmpty()) {
+            return;
+        }
+
+        $counts = [
+            'assets' => DB::table('character_assets')->whereIn('character_id', $characterIds->all())->count(),
+            'wallet_journal' => DB::table('character_wallet_journals')->whereIn('character_id', $characterIds->all())->count(),
+            'wallet_transactions' => DB::table('character_wallet_transactions')->whereIn('character_id', $characterIds->all())->count(),
+            'industry_jobs' => DB::table('character_industry_jobs')->whereIn('character_id', $characterIds->all())->count(),
+            'mining' => DB::table('character_minings')->whereIn('character_id', $characterIds->all())->count(),
+            'market_orders' => DB::table('character_orders')->whereIn('character_id', $characterIds->all())->count(),
+        ];
+
+        $activityCount = array_sum($counts);
+        $oldestBirthday = $characters->pluck('birthday')->filter()->sort()->first();
+        $oldestAgeDays = $oldestBirthday ? now()->diffInDays($oldestBirthday) : null;
+        $totalSkillpoints = $characters->sum(fn ($character) => (int) optional($character->skillpoints)->total_sp);
+
+        if ($oldestAgeDays !== null && $oldestAgeDays >= 180 && $activityCount <= 10) {
+            $evidence->push([
+                'category' => 'thin_seat_footprint',
+                'score' => 14,
+                'title' => 'Thin SeAT footprint for account age',
+                'details' => sprintf('%s has an older monitored character history but only %d visible SeAT activity rows across key datasets.',
+                    $user->name,
+                    $activityCount
+                ),
+                'meta' => [
+                    'oldest_age_days' => $oldestAgeDays,
+                    'activity_count' => $activityCount,
+                    'counts' => $counts,
+                ],
+            ]);
+        }
+
+        $productiveFootprint = $counts['wallet_journal'] + $counts['wallet_transactions'] + $counts['industry_jobs'] + $counts['mining'] + $counts['market_orders'];
+        if ($productiveFootprint <= 3) {
+            $evidence->push([
+                'category' => 'no_productive_footprint',
+                'score' => 12,
+                'title' => 'Little PvE, industry, or market footprint',
+                'details' => sprintf('%s has only %d wallet, mining, industry, or market rows across monitored characters.',
+                    $user->name,
+                    $productiveFootprint
+                ),
+                'meta' => [
+                    'productive_footprint' => $productiveFootprint,
+                    'counts' => $counts,
+                ],
+            ]);
+        }
+
+        if ($oldestAgeDays !== null && $oldestAgeDays >= 365 && $totalSkillpoints > 0 && $totalSkillpoints < 15000000) {
+            $evidence->push([
+                'category' => 'age_skill_mismatch',
+                'score' => 12,
+                'title' => 'Character age and skillpoints do not line up',
+                'details' => sprintf('%s has monitored characters at least %d days old but only %s total monitored SP.',
+                    $user->name,
+                    $oldestAgeDays,
+                    number_format($totalSkillpoints)
+                ),
+                'meta' => [
+                    'oldest_age_days' => $oldestAgeDays,
+                    'skillpoints' => $totalSkillpoints,
+                    'threshold' => 15000000,
+                ],
+            ]);
+        }
+
+        if ($counts['assets'] <= 5) {
+            $evidence->push([
+                'category' => 'low_assets',
+                'score' => $counts['assets'] === 0 ? 12 : 8,
+                'title' => 'No or low visible assets',
+                'details' => sprintf('%s has %d visible asset row%s across monitored characters.',
+                    $user->name,
+                    $counts['assets'],
+                    $counts['assets'] === 1 ? '' : 's'
+                ),
+                'meta' => [
+                    'asset_count' => $counts['assets'],
+                ],
+            ]);
+        }
+
+        $this->addAssetLocationRiskEvidence($user, $characterIds, $hostileEntityIds, $evidence);
+    }
+
+    private function addAssetLocationRiskEvidence(User $user, $characterIds, $hostileEntityIds, $evidence): void
+    {
+        if ($characterIds->isEmpty() || $hostileEntityIds->isEmpty() || !Schema::hasTable('character_assets') || !Schema::hasColumn('character_assets', 'location_id')) {
+            return;
+        }
+
+        $hostileLocationAssets = DB::table('character_assets')
+            ->whereIn('character_id', $characterIds->all())
+            ->whereIn('location_id', $hostileEntityIds->all())
+            ->select('location_id', DB::raw('count(*) as asset_count'))
+            ->groupBy('location_id')
+            ->orderByDesc('asset_count')
+            ->get();
+
+        if ($hostileLocationAssets->isEmpty()) {
+            return;
+        }
+
+        $assetCount = $hostileLocationAssets->sum('asset_count');
+        $evidence->push([
+            'category' => 'hostile_asset_location',
+            'score' => min(20, 10 + ($hostileLocationAssets->count() * 2)),
+            'title' => 'Assets located at hostile-matching locations',
+            'details' => sprintf('%s has %d asset row%s at locations matching configured hostile entity IDs.',
+                $user->name,
+                $assetCount,
+                $assetCount === 1 ? '' : 's'
+            ),
+            'meta' => [
+                'locations' => $hostileLocationAssets->map(fn ($row) => [
+                    'location_id' => (int) $row->location_id,
+                    'asset_count' => (int) $row->asset_count,
+                ])->values()->all(),
+            ],
+        ]);
+    }
+
+    private function monitoredCharacters()
+    {
+        $entities = IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_MONITORED)
+            ->get();
+
+        $corporationIds = $entities->where('entity_type', 'corporation')->pluck('entity_id')->map(fn ($id) => (int) $id)->all();
+        $allianceIds = $entities->where('entity_type', 'alliance')->pluck('entity_id')->map(fn ($id) => (int) $id)->all();
+
+        return CharacterInfo::query()
+            ->with('skillpoints', 'user', 'affiliation.corporation', 'affiliation.alliance')
+            ->when(!empty($corporationIds) || !empty($allianceIds), function ($query) use ($corporationIds, $allianceIds) {
+                $query->where(function ($inner) use ($corporationIds, $allianceIds) {
+                    if (!empty($corporationIds)) {
+                        $inner->where(function ($corporationQuery) use ($corporationIds) {
+                            $corporationQuery->whereIn('corporation_id', $corporationIds)
+                                ->orWhereHas('affiliation', function ($affiliationQuery) use ($corporationIds) {
+                                    $affiliationQuery->whereIn('corporation_id', $corporationIds);
+                                });
+                        });
+                    }
+
+                    if (!empty($allianceIds)) {
+                        $inner->orWhereHas('affiliation', function ($affiliationQuery) use ($allianceIds) {
+                            $affiliationQuery->whereIn('alliance_id', $allianceIds);
+                        });
+                    }
+                });
+            })
+            ->when(empty($corporationIds) && empty($allianceIds), function ($query) {
+                $query->where('character_id', 0);
+            })
+            ->orderBy('name')
+            ->get();
+    }
+
+    private function monitoredCorporationIds()
+    {
+        $entities = IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_MONITORED)
+            ->get();
+
+        $corporationIds = $entities
+            ->where('entity_type', 'corporation')
+            ->pluck('entity_id')
+            ->map(fn ($id) => (int) $id);
+        $allianceIds = $entities
+            ->where('entity_type', 'alliance')
+            ->pluck('entity_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter()
+            ->values();
+
+        if ($allianceIds->isEmpty()) {
+            return $corporationIds->filter()->unique()->values();
+        }
+
+        $allianceCorporationIds = collect();
+
+        if (Schema::hasTable('alliance_members') && Schema::hasColumn('alliance_members', 'alliance_id') && Schema::hasColumn('alliance_members', 'corporation_id')) {
+            $allianceCorporationIds = DB::table('alliance_members')
+                ->whereIn('alliance_id', $allianceIds->all())
+                ->pluck('corporation_id')
+                ->map(fn ($id) => (int) $id);
+        }
+
+        if ($allianceCorporationIds->isEmpty() && Schema::hasTable('character_affiliations')) {
+            $allianceCorporationIds = DB::table('character_affiliations')
+                ->whereIn('alliance_id', $allianceIds->all())
+                ->whereNotNull('corporation_id')
+                ->pluck('corporation_id')
+                ->map(fn ($id) => (int) $id);
+        }
+
+        return $corporationIds
+            ->merge($allianceCorporationIds)
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    private function corporationId(CharacterInfo $character): ?int
+    {
+        return $character->corporation_id ? (int) $character->corporation_id : optional($character->affiliation)->corporation_id;
+    }
+
+    private function corporationName(CharacterInfo $character, $affiliation): ?string
+    {
+        return $character->corporation_name
+            ?: optional(optional($affiliation)->corporation)->name;
+    }
+
+    private function allianceId($affiliation): ?int
+    {
+        return optional($affiliation)->alliance_id ? (int) $affiliation->alliance_id : null;
+    }
+
+    private function allianceName($affiliation): ?string
+    {
+        return optional(optional($affiliation)->alliance)->name;
+    }
+
+    private function dateString($value): ?string
+    {
+        if (!$value) {
+            return null;
+        }
+
+        return method_exists($value, 'toDateString') ? $value->toDateString() : (string) $value;
+    }
+
+    private function isPublicIp(string $ip): bool
+    {
+        return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false;
+    }
+}

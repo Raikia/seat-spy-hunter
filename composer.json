@@ -1,0 +1,36 @@
+{
+    "name": "raikia/seat-spy-hunter",
+    "description": "Read-only spy-hunting dashboard for suspicious EVE Online account activity in SeAT.",
+    "type": "seat-plugin",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Raikia",
+            "email": "raikia@protonmail.com"
+        }
+    ],
+    "require": {
+        "eveseat/services": "^5.0",
+        "eveseat/eveapi": "^5.0",
+        "eveseat/web": "^5.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Raikia\\SeatSpyHunter\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Raikia\\SeatSpyHunter\\SeatSpyHunterServiceProvider"
+            ]
+        },
+        "seat": {
+            "name": "Spy Hunter",
+            "icon": "fas fa-user-secret",
+            "route": "seat-spy-hunter.index"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
