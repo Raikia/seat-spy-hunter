@@ -3,7 +3,9 @@
 namespace Raikia\SeatSpyHunter\Services;
 
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Raikia\SeatSpyHunter\Models\IpIntelligence;
 use Raikia\SeatSpyHunter\Models\VpnLookupQueue;
 
@@ -30,7 +32,7 @@ class IpIntelligenceService
 
         $missingIps = $ips->reject(fn ($ip) => $records->has($ip))->values();
         if ($missingIps->isNotEmpty()) {
-            $this->queueMissingIps($missingIps);
+            $this->queuePublicIps($missingIps);
         }
 
         return $records
@@ -42,7 +44,13 @@ class IpIntelligenceService
 
     public function processQueue(int $limit = 1000): int
     {
-        if (!$this->isVpnApiEnabled()) {
+        if (!$this->isVpnApiConfigured()) {
+            return 0;
+        }
+
+        $this->queueKnownLoginIps(max($limit, 1000));
+
+        if ($this->isVpnApiRateLimited()) {
             return 0;
         }
 
@@ -84,20 +92,64 @@ class IpIntelligenceService
         return $processed;
     }
 
-    private function queueMissingIps(Collection $ips): void
+    public function queueKnownLoginIps(int $limit = 5000): int
     {
-        if (!$this->isVpnApiConfigured()) {
-            return;
+        if (!$this->isVpnApiConfigured() || !Schema::hasTable('user_login_histories')) {
+            return 0;
         }
 
+        $ips = DB::table('user_login_histories')
+            ->whereNotNull('source')
+            ->where('source', '<>', '')
+            ->select('source')
+            ->groupBy('source')
+            ->orderBy('source')
+            ->limit($limit)
+            ->pluck('source');
+
+        return $this->queuePublicIps($ips);
+    }
+
+    public function queuePublicIps(Collection $ips): int
+    {
+        if (!$this->isVpnApiConfigured()) {
+            return 0;
+        }
+
+        $ips = $ips
+            ->map(fn ($ip) => trim((string) $ip))
+            ->filter(fn ($ip) => $ip !== '' && $this->isPublicIp($ip))
+            ->unique()
+            ->values();
+
+        if ($ips->isEmpty()) {
+            return 0;
+        }
+
+        $cachedIps = IpIntelligence::query()
+            ->whereIn('ip', $ips->all())
+            ->pluck('ip')
+            ->flip();
+        $queuedIps = VpnLookupQueue::query()
+            ->whereIn('ip', $ips->all())
+            ->pluck('ip')
+            ->flip();
+        $queued = 0;
+
         foreach ($ips as $ip) {
-            VpnLookupQueue::query()->firstOrCreate([
+            if ($cachedIps->has($ip) || $queuedIps->has($ip)) {
+                continue;
+            }
+
+            VpnLookupQueue::query()->create([
                 'ip' => $ip,
-            ], [
                 'status' => 'pending',
                 'available_at' => now(),
             ]);
+            $queued++;
         }
+
+        return $queued;
     }
 
     private function isVpnApiEnabled(): bool
@@ -166,6 +218,11 @@ class IpIntelligenceService
                 'raw' => $payload,
                 'checked_at' => now(),
             ]);
+    }
+
+    private function isPublicIp(string $ip): bool
+    {
+        return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false;
     }
 
     private function vpnApiRiskScore(bool $isVpn, bool $isProxy, bool $isTor, bool $isRelay): int

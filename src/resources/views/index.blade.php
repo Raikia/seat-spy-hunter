@@ -68,7 +68,15 @@
                         @endforeach
                     </select>
                 </div>
-                <div class="form-group col-md-3">
+                <div class="form-group col-md-2">
+                    <label for="review_status">Review</label>
+                    <select name="review_status" id="review_status" class="form-control">
+                        @foreach(['active' => 'Active Queue', 'new' => 'New', 'reviewing' => 'Reviewing', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated', 'cleared' => 'Cleared', 'all' => 'All'] as $value => $label)
+                            <option value="{{ $value }}" {{ $reviewStatus === $value ? 'selected' : '' }}>{{ $label }}</option>
+                        @endforeach
+                    </select>
+                </div>
+                <div class="form-group col-md-2">
                     <label for="evidence_category">Evidence</label>
                     <select name="evidence_category" id="evidence_category" class="form-control">
                         <option value="">Any</option>
@@ -85,7 +93,7 @@
                         <option value="without" {{ $suppressed === 'without' ? 'selected' : '' }}>No hidden evidence</option>
                     </select>
                 </div>
-                <div class="form-group col-md-3">
+                <div class="form-group col-md-2">
                     <label for="search">Search</label>
                     <input type="text" name="search" id="search" value="{{ $search }}" class="form-control" placeholder="User account, user ID, corporation, alliance">
                 </div>
@@ -131,7 +139,9 @@
                                 </a><br>
                                 <small class="text-muted">User #{{ $accountUserId }}</small>
                                 <div class="mt-1">
-                                    @php($reviewBadge = ['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'][$report->review_status] ?? 'secondary')
+                                    @php
+                                        $reviewBadge = data_get(['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'], $report->review_status, 'secondary');
+                                    @endphp
                                     <span class="badge badge-{{ $reviewBadge }}">{{ ucfirst($report->review_status ?: 'new') }}</span>
                                     @if($hasNewEvidence)
                                         <span class="badge badge-primary">New evidence</span>
@@ -163,7 +173,9 @@
                                 <small class="text-muted">{{ $report->alliance_name ?: ($report->alliance_id ?: 'No alliance') }}</small>
                             </td>
                             <td data-order="{{ $report->score }}">
-                                @php($badge = ['critical' => 'danger', 'high' => 'warning', 'watch' => 'info', 'clear' => 'success'][$report->rating] ?? 'secondary')
+                                @php
+                                    $badge = data_get(['critical' => 'danger', 'high' => 'warning', 'watch' => 'info', 'clear' => 'success'], $report->rating, 'secondary');
+                                @endphp
                                 <span class="badge badge-{{ $badge }}">{{ ucfirst($report->rating) }}</span>
                                 <div class="small text-muted">{{ $report->score }}/100</div>
                             </td>

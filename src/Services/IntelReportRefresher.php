@@ -7,6 +7,8 @@ use Illuminate\Support\Facades\Schema;
 use Raikia\SeatSpyHunter\Models\CharacterIntelReport;
 use Raikia\SeatSpyHunter\Models\FalsePositiveSuppression;
 use Raikia\SeatSpyHunter\Models\IntelEntity;
+use Raikia\SeatSpyHunter\Models\IpIntelligence;
+use Seat\Eveapi\Models\RefreshToken;
 use Seat\Eveapi\Models\Character\CharacterInfo;
 use Seat\Eveapi\Models\Wallet\CharacterWalletJournal;
 use Seat\Eveapi\Models\Wallet\CharacterWalletTransaction;
@@ -18,13 +20,15 @@ class IntelReportRefresher
     private $hostileContacts;
     private $eveWho;
     private $settings;
+    private $ipIntelligence;
 
-    public function __construct(CharacterRiskAnalyzer $analyzer, HostileContactResolver $hostileContacts, EveWhoService $eveWho, IntelSettings $settings)
+    public function __construct(CharacterRiskAnalyzer $analyzer, HostileContactResolver $hostileContacts, EveWhoService $eveWho, IntelSettings $settings, IpIntelligenceService $ipIntelligence)
     {
         $this->analyzer = $analyzer;
         $this->hostileContacts = $hostileContacts;
         $this->eveWho = $eveWho;
         $this->settings = $settings;
+        $this->ipIntelligence = $ipIntelligence;
     }
 
     public function refresh(): int
@@ -350,20 +354,41 @@ class IntelReportRefresher
             return [];
         }
 
-        return DB::table('user_login_histories')
+        $rows = DB::table('user_login_histories')
             ->where('user_id', $user->id)
             ->whereNotNull('source')
             ->where('source', '<>', '')
             ->select('source', DB::raw('count(*) as login_count'), DB::raw('max(created_at) as last_seen_at'))
             ->groupBy('source')
             ->orderByDesc('last_seen_at')
+            ->get();
+
+        $this->ipIntelligence->queuePublicIps($rows->pluck('source'));
+        $ipIntelligence = IpIntelligence::query()
+            ->whereIn('ip', $rows->pluck('source')->all())
             ->get()
-            ->map(fn ($row) => [
+            ->keyBy('ip');
+
+        return $rows->map(function ($row) use ($ipIntelligence) {
+                $record = $ipIntelligence->get($row->source);
+
+                return [
                 'ip' => $row->source,
                 'login_count' => (int) $row->login_count,
                 'last_seen_at' => $this->dateString($row->last_seen_at),
                 'public' => $this->isPublicIp((string) $row->source),
-            ])
+                'intelligence' => $record ? [
+                    'is_vpn' => (bool) $record->is_vpn,
+                    'is_proxy' => (bool) $record->is_proxy,
+                    'is_tor' => (bool) $record->is_tor,
+                    'is_hosting' => (bool) $record->is_hosting,
+                    'risk_score' => (int) $record->risk_score,
+                    'provider' => $record->provider,
+                    'checked_at' => $this->dateString($record->checked_at),
+                    'suspicious' => $record->isSuspicious(),
+                ] : null,
+            ];
+            })
             ->values()
             ->all();
     }
@@ -377,6 +402,8 @@ class IntelReportRefresher
         if ($connectorEvidence) {
             $evidence->push($connectorEvidence);
         }
+
+        $this->addEsiCoverageHealthEvidence($user, $characters, $evidence);
 
         if ($characters->count() > 1) {
             $mitigation = min(20, ($characters->count() - 1) * 8);
@@ -419,6 +446,115 @@ class IntelReportRefresher
         $this->addWalletAccountEvidence($user, $characterIds, $evidence);
 
         return $evidence;
+    }
+
+    private function addEsiCoverageHealthEvidence(User $user, $characters, $evidence): void
+    {
+        $characterIds = $characters->pluck('character_id')->map(fn ($id) => (int) $id)->filter()->values();
+        if ($characterIds->isEmpty()) {
+            return;
+        }
+
+        $scopeGroups = $this->esiCoverageScopeGroups();
+        $requiredScopes = collect($scopeGroups)->flatten()->unique()->values();
+        $tokens = RefreshToken::withTrashed()
+            ->whereIn('character_id', $characterIds->all())
+            ->get()
+            ->keyBy('character_id');
+
+        $rows = $characters->map(function ($character) use ($tokens, $scopeGroups, $requiredScopes) {
+            $token = $tokens->get((int) $character->character_id);
+            $scopes = collect($token ? ($token->scopes ?: []) : [])->map(fn ($scope) => (string) $scope)->values();
+            $missingScopes = $requiredScopes->diff($scopes)->values();
+            $missingScopeGroups = collect($scopeGroups)
+                ->filter(fn ($groupScopes) => collect($groupScopes)->diff($scopes)->isNotEmpty())
+                ->keys()
+                ->values();
+            $status = 'healthy';
+            $issues = [];
+
+            if (!$token) {
+                $status = 'missing_token';
+                $issues[] = 'No token';
+            } else {
+                if ($token->deleted_at) {
+                    $status = 'deleted_token';
+                    $issues[] = 'Deleted token';
+                }
+
+                if (blank($token->refresh_token)) {
+                    $status = 'missing_refresh_token';
+                    $issues[] = 'Missing refresh token';
+                }
+
+                if ($token->updated_at && $token->updated_at->lt(now()->subDays(30))) {
+                    $status = $status === 'healthy' ? 'stale_token' : $status;
+                    $issues[] = 'Stale token';
+                }
+            }
+
+            if ($missingScopeGroups->isNotEmpty()) {
+                $status = $status === 'healthy' ? 'scope_gaps' : $status;
+                $issues[] = 'Missing ' . $missingScopeGroups->implode(', ');
+            }
+
+            return [
+                'character_id' => (int) $character->character_id,
+                'character_name' => $character->name,
+                'status' => $status,
+                'issues' => $issues,
+                'scope_count' => $scopes->count(),
+                'scopes_profile' => $token ? $token->scopes_profile : null,
+                'missing_scope_groups' => $missingScopeGroups->all(),
+                'missing_scopes' => $missingScopes->all(),
+                'has_refresh_token' => $token ? filled($token->refresh_token) : false,
+                'access_token_current' => $token && $token->expires_on ? $token->expires_on->gt(now()) : false,
+                'expires_on' => $token ? $this->dateString($token->expires_on) : null,
+                'updated_at' => $token ? $this->dateString($token->updated_at) : null,
+                'deleted_at' => $token ? $this->dateString($token->deleted_at) : null,
+            ];
+        })->values();
+
+        $issueRows = $rows->filter(fn ($row) => !empty($row['issues']));
+        $healthyRows = $rows->where('status', 'healthy');
+        $coveragePercent = $rows->isNotEmpty() ? (int) round(($healthyRows->count() / $rows->count()) * 100) : 0;
+
+        $evidence->push([
+            'category' => 'esi_coverage_health',
+            'score' => 0,
+            'title' => 'ESI coverage health',
+            'details' => sprintf('%s has %d of %d monitored character%s with complete current ESI coverage for Spy Hunter review data.',
+                $user->name,
+                $healthyRows->count(),
+                $rows->count(),
+                $rows->count() === 1 ? '' : 's'
+            ),
+            'meta' => [
+                'coverage_percent' => $coveragePercent,
+                'healthy_count' => $healthyRows->count(),
+                'issue_count' => $issueRows->count(),
+                'character_count' => $rows->count(),
+                'required_scope_groups' => array_keys($scopeGroups),
+                'characters' => $rows->all(),
+            ],
+        ]);
+    }
+
+    private function esiCoverageScopeGroups(): array
+    {
+        return [
+            'Contacts' => ['esi-characters.read_contacts.v1'],
+            'Mail' => ['esi-mail.read_mail.v1'],
+            'Wallet' => ['esi-wallet.read_character_wallet.v1'],
+            'Assets' => ['esi-assets.read_assets.v1'],
+            'Skills' => ['esi-skills.read_skills.v1'],
+            'Contracts' => ['esi-contracts.read_character_contracts.v1'],
+            'Industry' => ['esi-industry.read_character_jobs.v1'],
+            'Market' => ['esi-markets.read_character_orders.v1'],
+            'Loyalty Points' => ['esi-characters.read_loyalty.v1'],
+            'Fittings' => ['esi-fittings.read_fittings.v1'],
+            'Killmails' => ['esi-killmails.read_killmails.v1'],
+        ];
     }
 
     private function connectorEvidence(User $user): ?array
@@ -704,6 +840,8 @@ class IntelReportRefresher
 
         $counts = [
             'assets' => $this->countCharacterRows('character_assets', $characterIds),
+            'saved_fittings' => $this->countCharacterRows('character_fittings', $characterIds),
+            'lossmails' => $this->countCharacterLossmails($characterIds),
             'wallet_journal' => $this->countCharacterRows('character_wallet_journals', $characterIds),
             'wallet_transactions' => $this->countCharacterRows('character_wallet_transactions', $characterIds),
             'industry_jobs' => $this->countCharacterRows('character_industry_jobs', $characterIds),
@@ -784,7 +922,91 @@ class IntelReportRefresher
             ]);
         }
 
+        if (Schema::hasTable('character_fittings') && Schema::hasColumn('character_fittings', 'character_id') && $counts['saved_fittings'] === 0) {
+            $evidence->push([
+                'category' => 'no_saved_fittings',
+                'score' => 12,
+                'title' => 'No saved fittings on account characters',
+                'details' => sprintf('%s has no saved fittings across monitored characters on this SeAT account.', $user->name),
+                'meta' => [
+                    'saved_fitting_count' => 0,
+                    'character_count' => $characterIds->count(),
+                ],
+            ]);
+        }
+
+        if ($counts['lossmails'] === 0 && (Schema::hasTable('killmail_victims') || Schema::hasTable('character_killmails'))) {
+            $evidence->push([
+                'category' => 'no_lossmails',
+                'score' => 12,
+                'title' => 'No recorded lossmails',
+                'details' => sprintf('%s has no recorded lossmails across monitored characters. This can indicate a thin or carefully-managed public footprint.', $user->name),
+                'meta' => [
+                    'lossmail_count' => 0,
+                    'character_count' => $characterIds->count(),
+                ],
+            ]);
+        }
+
+        $this->addLowLoyaltyPointEvidence($user, $characterIds, $evidence);
+
         $this->addAssetLocationRiskEvidence($user, $characterIds, $hostileEntityIds, $evidence);
+    }
+
+    private function addLowLoyaltyPointEvidence(User $user, $characterIds, $evidence): void
+    {
+        if ($characterIds->isEmpty() || !Schema::hasTable('character_loyalty_points')) {
+            return;
+        }
+
+        $rows = DB::table('character_loyalty_points')
+            ->whereIn('character_id', $characterIds->all())
+            ->get(['character_id', 'corporation_id', 'amount']);
+
+        if ($rows->isEmpty()) {
+            return;
+        }
+
+        $corporationNames = $this->corporationNames($rows->pluck('corporation_id')->filter()->unique()->values());
+        $nonParagonRows = $rows
+            ->reject(function ($row) use ($corporationNames) {
+                $name = strtolower((string) $corporationNames->get((int) $row->corporation_id, ''));
+
+                return str_contains($name, 'paragon');
+            })
+            ->values();
+
+        if ($nonParagonRows->isEmpty()) {
+            return;
+        }
+
+        $maxLp = (int) $nonParagonRows->max('amount');
+
+        if ($maxLp >= 2000) {
+            return;
+        }
+
+        $evidence->push([
+            'category' => 'low_loyalty_points',
+            'score' => 8,
+            'title' => 'Very low non-Paragon loyalty points',
+            'details' => sprintf('%s has LP records, but no non-Paragon corporation balance at or above 2,000 LP.', $user->name),
+            'meta' => [
+                'threshold' => 2000,
+                'max_non_paragon_lp' => $maxLp,
+                'corporations' => $nonParagonRows
+                    ->sortByDesc('amount')
+                    ->take(10)
+                    ->map(fn ($row) => [
+                        'character_id' => (int) $row->character_id,
+                        'corporation_id' => (int) $row->corporation_id,
+                        'corporation_name' => $corporationNames->get((int) $row->corporation_id),
+                        'amount' => (int) $row->amount,
+                    ])
+                    ->values()
+                    ->all(),
+            ],
+        ]);
     }
 
     private function addAssetLocationRiskEvidence(User $user, $characterIds, $hostileEntityIds, $evidence): void
@@ -935,6 +1157,30 @@ class IntelReportRefresher
         return (int) DB::table($table)
             ->whereIn('character_id', $characterIds->all())
             ->count();
+    }
+
+    private function countCharacterLossmails($characterIds): int
+    {
+        if (Schema::hasTable('killmail_victims') && Schema::hasColumn('killmail_victims', 'character_id')) {
+            return (int) DB::table('killmail_victims')
+                ->whereIn('character_id', $characterIds->all())
+                ->count();
+        }
+
+        return $this->countCharacterRows('character_killmails', $characterIds);
+    }
+
+    private function corporationNames($corporationIds)
+    {
+        $corporationIds = collect($corporationIds)->filter()->map(fn ($id) => (int) $id)->unique()->values();
+
+        if ($corporationIds->isEmpty() || !Schema::hasTable('corporation_infos')) {
+            return collect();
+        }
+
+        return DB::table('corporation_infos')
+            ->whereIn('corporation_id', $corporationIds->all())
+            ->pluck('name', 'corporation_id');
     }
 
     private function dateString($value): ?string

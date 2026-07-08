@@ -20,7 +20,9 @@
                         @endif
                     </p>
                 </div>
-                @php($badge = ['critical' => 'danger', 'high' => 'warning', 'watch' => 'info', 'clear' => 'success'][$report->rating] ?? 'secondary')
+                @php
+                    $badge = data_get(['critical' => 'danger', 'high' => 'warning', 'watch' => 'info', 'clear' => 'success'], $report->rating, 'secondary');
+                @endphp
                 <div class="text-right">
                     <span class="badge badge-{{ $badge }} p-2">{{ ucfirst($report->rating) }}</span>
                     <div class="h4 mb-0 mt-2">{{ $report->score }}/100</div>

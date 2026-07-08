@@ -18,6 +18,7 @@ class IntelDashboardController extends Controller
         $search = $request->get('search');
         $evidenceCategory = $request->get('evidence_category');
         $suppressed = $request->get('suppressed');
+        $reviewStatus = $request->get('review_status', 'active');
         $evidenceCategories = $this->evidenceCategories();
 
         $reports = CharacterIntelReport::query()
@@ -26,6 +27,12 @@ class IntelDashboardController extends Controller
             ->withCount(['evidence as total_evidence_count'])
             ->when($rating, function ($query) use ($rating) {
                 $query->where('rating', $rating);
+            })
+            ->when($reviewStatus === 'active', function ($query) {
+                $query->where('review_status', '<>', 'cleared');
+            })
+            ->when(in_array($reviewStatus, ['new', 'reviewing', 'watchlisted', 'escalated', 'cleared'], true), function ($query) use ($reviewStatus) {
+                $query->where('review_status', $reviewStatus);
             })
             ->when($evidenceCategory && array_key_exists($evidenceCategory, $evidenceCategories), function ($query) use ($evidenceCategory) {
                 $query->whereHas('evidence', function ($evidence) use ($evidenceCategory) {
@@ -69,7 +76,7 @@ class IntelDashboardController extends Controller
             'last_analyzed_at' => $lastAnalyzedAt ? Carbon::parse($lastAnalyzedAt)->toDateTimeString() : null,
         ];
 
-        return view('seat-spy-hunter::index', compact('reports', 'summary', 'rating', 'search', 'evidenceCategory', 'evidenceCategories', 'suppressed'));
+        return view('seat-spy-hunter::index', compact('reports', 'summary', 'rating', 'search', 'evidenceCategory', 'evidenceCategories', 'suppressed', 'reviewStatus'));
     }
 
     private function evidenceCategories(): array
@@ -82,6 +89,7 @@ class IntelDashboardController extends Controller
             'hostile_market_transaction' => 'Market Transactions',
             'new_evidence_since_review' => 'New Evidence Since Review',
             'suppressed_signals' => 'Suppressed Evidence',
+            'esi_coverage_health' => 'ESI Coverage Health',
             'hostile_corporation_history' => 'Hostile Corp History',
             'hostile_asset_location' => 'Hostile Asset Location',
             'shared_ip' => 'Shared IP',
@@ -92,6 +100,9 @@ class IntelDashboardController extends Controller
             'stable_wallet_balance' => 'Stable Wallet',
             'thin_seat_footprint' => 'Thin SeAT Footprint',
             'no_productive_footprint' => 'No PvE/Indy/Market',
+            'no_saved_fittings' => 'No Saved Fittings',
+            'no_lossmails' => 'No Lossmails',
+            'low_loyalty_points' => 'Low Loyalty Points',
             'age_skill_mismatch' => 'Age vs SP',
             'low_assets' => 'Low Assets',
             'corporation_history_churn' => 'Corp Churn',

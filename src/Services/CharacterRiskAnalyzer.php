@@ -74,6 +74,7 @@ class CharacterRiskAnalyzer
         $matches = CharacterContact::query()
             ->where('character_id', $character->character_id)
             ->whereIn('contact_id', $hostileEntityIds->all())
+            ->where('standing', '>', 0)
             ->with('entity')
             ->get();
 
@@ -94,8 +95,8 @@ class CharacterRiskAnalyzer
             $evidence->push([
                 'category' => 'hostile_contacts',
                 'score' => min(35, $this->settings->hostileInteractionScore() + (($matches->count() - 1) * 5)),
-                'title' => 'Has hostile or negative contacts',
-                'details' => sprintf('%s has %d contact match%s against configured hostile entities or monitored negative standings: %s. Watched contacts are a stronger active-intel signal than passive negative standings.',
+                'title' => 'Positive standings toward hostile contacts',
+                'details' => sprintf('%s has %d positive-standing contact match%s against configured hostile entities or entities your monitored groups mark negative: %s. Positive standings toward hostile entities are a stronger concern than ordinary negative-contact bookkeeping.',
                     $character->name,
                     $matches->count(),
                     $matches->count() === 1 ? '' : 'es',
@@ -116,7 +117,7 @@ class CharacterRiskAnalyzer
                         'relationship' => 'character_contact_list',
                         'watched_count' => $watchedCount,
                         'blocked_count' => $blockedCount,
-                        'interpretation' => $watchedCount > 0 ? 'active_watchlist' : 'stored_contact',
+                        'interpretation' => $watchedCount > 0 ? 'positive_standing_watchlist' : 'positive_standing_contact',
                     ],
                 ],
             ]);

@@ -76,7 +76,7 @@
                             <div class="form-group col-md-4">
                                 <label for="hostile_interaction_score">
                                     Hostile Interaction
-                                    <i class="fas fa-info-circle text-muted ml-1" data-toggle="tooltip" title="Base score used when contacts, mail, wallet activity, or negative standings match hostile entities. Repeated matches and outbound direction can add more points."></i>
+                                    <i class="fas fa-info-circle text-muted ml-1" data-toggle="tooltip" title="Base score used when positive contacts, mail, or direct wallet activity match hostile entities. Repeated matches and outbound direction can add more points."></i>
                                 </label>
                                 <input type="number" name="hostile_interaction_score" id="hostile_interaction_score" class="form-control" min="0" max="100" value="{{ $settings->hostileInteractionScore() }}">
                             </div>

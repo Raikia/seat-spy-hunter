@@ -174,10 +174,10 @@ class EveWhoService
             return collect();
         }
 
-        $hostileMembers = EveWhoMember::query()
+        $hostileMemberRows = EveWhoMember::query()
             ->whereIn('character_id', $hostileCharacterIds->all())
-            ->get()
-            ->groupBy('character_id');
+            ->get();
+        $hostileMembers = $hostileMemberRows->groupBy('character_id');
 
         $hostileHistories = $this->employmentHistories($hostileCharacterIds, $corporationIds)
             ->reject(fn ($row) => $this->isIgnoredEmploymentCorporation((int) $row->corporation_id, $ignoredCorporationIds))
@@ -188,33 +188,44 @@ class EveWhoService
         }
 
         $characterNames = $this->characterNames($characterIds->merge($hostileCharacterIds)->unique()->values());
+        $corporationDetails = $this->corporationDetails($corporationIds);
+        $allianceNames = $this->allianceNames($corporationDetails->pluck('alliance_id')->filter()->unique()->values());
+        $sourceEntityNames = $this->sourceEntityNames($hostileMemberRows);
 
-        return $localHistories->flatMap(function ($local) use ($hostileHistories, $hostileMembers, $characterNames) {
+        return $localHistories->flatMap(function ($local) use ($hostileHistories, $hostileMembers, $characterNames, $corporationDetails, $allianceNames, $sourceEntityNames) {
             return $hostileHistories
                 ->where('corporation_id', (int) $local->corporation_id)
-                ->map(function ($hostile) use ($local, $hostileMembers, $characterNames) {
+                ->map(function ($hostile) use ($local, $hostileMembers, $characterNames, $corporationDetails, $allianceNames, $sourceEntityNames) {
                     $member = $hostileMembers->get((int) $hostile->character_id, collect())->first();
                     $sameTime = $this->dateRangesOverlap($local->start_date, $local->end_date, $hostile->start_date, $hostile->end_date);
                     $lastRelevantDate = $this->overlapLastRelevantDate($local->start_date, $local->end_date, $hostile->start_date, $hostile->end_date, $sameTime);
+                    $overlapWindow = $this->overlapWindow($local->start_date, $local->end_date, $hostile->start_date, $hostile->end_date, $sameTime);
                     $ageDays = $lastRelevantDate ? now()->diffInDays($lastRelevantDate) : null;
+                    $corporation = $corporationDetails->get((int) $local->corporation_id, []);
+                    $allianceId = data_get($corporation, 'alliance_id');
 
                     return [
                         'character_id' => (int) $local->character_id,
                         'character_name' => $characterNames->get((int) $local->character_id),
                         'corporation_id' => (int) $local->corporation_id,
-                        'corporation_name' => $hostile->corporation_name,
+                        'corporation_name' => data_get($corporation, 'name') ?: $hostile->corporation_name,
+                        'alliance_id' => $allianceId ? (int) $allianceId : null,
+                        'alliance_name' => $allianceId ? $allianceNames->get((int) $allianceId) : null,
                         'hostile_character_id' => (int) $hostile->character_id,
                         'hostile_character_name' => $member && $member->character_name ? $member->character_name : $characterNames->get((int) $hostile->character_id),
                         'same_time' => $sameTime,
-                        'local_start_date' => $this->dateString($local->start_date),
-                        'local_end_date' => $this->dateString($local->end_date),
-                        'hostile_start_date' => $this->dateString($hostile->start_date),
-                        'hostile_end_date' => $this->dateString($hostile->end_date),
-                        'overlap_last_seen_date' => $this->dateString($lastRelevantDate),
+                        'local_start_date' => $this->dateOnlyString($local->start_date),
+                        'local_end_date' => $this->dateOnlyString($local->end_date),
+                        'hostile_start_date' => $this->dateOnlyString($hostile->start_date),
+                        'hostile_end_date' => $this->dateOnlyString($hostile->end_date),
+                        'overlap_start_date' => $this->dateOnlyString(data_get($overlapWindow, 'start')),
+                        'overlap_end_date' => $this->dateOnlyString(data_get($overlapWindow, 'end')),
+                        'overlap_last_seen_date' => $this->dateOnlyString($lastRelevantDate),
                         'overlap_age_days' => $ageDays,
                         'overlap_age_bucket' => $this->overlapAgeBucket($ageDays),
                         'source_entity_type' => $member ? $member->source_entity_type : null,
                         'source_entity_id' => $member ? $member->source_entity_id : null,
+                        'source_entity_name' => $member ? $sourceEntityNames->get($member->source_entity_type . ':' . (int) $member->source_entity_id) : null,
                     ];
                 });
         })
@@ -445,6 +456,61 @@ class EveWhoService
             ->pluck('name', 'corporation_id');
     }
 
+    private function corporationDetails(Collection $corporationIds): Collection
+    {
+        if ($corporationIds->isEmpty() || !Schema::hasTable('corporation_infos')) {
+            return collect();
+        }
+
+        return DB::table('corporation_infos')
+            ->whereIn('corporation_id', $corporationIds->map(fn ($id) => (int) $id)->all())
+            ->get(['corporation_id', 'name', 'alliance_id'])
+            ->mapWithKeys(fn ($row) => [
+                (int) $row->corporation_id => [
+                    'name' => $row->name,
+                    'alliance_id' => $row->alliance_id ? (int) $row->alliance_id : null,
+                ],
+            ]);
+    }
+
+    private function allianceNames(Collection $allianceIds): Collection
+    {
+        if ($allianceIds->isEmpty() || !Schema::hasTable('alliances')) {
+            return collect();
+        }
+
+        return DB::table('alliances')
+            ->whereIn('alliance_id', $allianceIds->map(fn ($id) => (int) $id)->all())
+            ->pluck('name', 'alliance_id');
+    }
+
+    private function sourceEntityNames(Collection $members): Collection
+    {
+        $entities = IntelEntity::query()
+            ->whereIn('category', [IntelEntity::CATEGORY_HOSTILE, IntelEntity::CATEGORY_MONITORED])
+            ->get()
+            ->mapWithKeys(fn (IntelEntity $entity) => [$entity->entity_type . ':' . (int) $entity->entity_id => $entity->name]);
+        $corporationIds = $members
+            ->where('source_entity_type', 'corporation')
+            ->pluck('source_entity_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+        $allianceIds = $members
+            ->where('source_entity_type', 'alliance')
+            ->pluck('source_entity_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        $this->corporationNames($corporationIds)->each(fn ($name, $id) => $entities->put('corporation:' . (int) $id, $name));
+        $this->allianceNames($allianceIds)->each(fn ($name, $id) => $entities->put('alliance:' . (int) $id, $name));
+
+        return $entities;
+    }
+
     private function characterNames(Collection $characterIds): Collection
     {
         if ($characterIds->isEmpty() || !Schema::hasTable('character_infos')) {
@@ -475,6 +541,32 @@ class EveWhoService
         }
 
         return $leftStart <= $rightEnd && $rightStart <= $leftEnd;
+    }
+
+    private function overlapWindow($leftStart, $leftEnd, $rightStart, $rightEnd, bool $sameTime): array
+    {
+        if (!$sameTime) {
+            return ['start' => null, 'end' => null];
+        }
+
+        $leftStart = $leftStart ? \Carbon\Carbon::parse($leftStart) : null;
+        $rightStart = $rightStart ? \Carbon\Carbon::parse($rightStart) : null;
+        $leftEnd = $leftEnd ? \Carbon\Carbon::parse($leftEnd) : null;
+        $rightEnd = $rightEnd ? \Carbon\Carbon::parse($rightEnd) : null;
+
+        return [
+            'start' => collect([$leftStart, $rightStart])->filter()->sortDesc()->first(),
+            'end' => collect([$leftEnd, $rightEnd])->filter()->sort()->first(),
+        ];
+    }
+
+    private function dateOnlyString($value): ?string
+    {
+        if (!$value) {
+            return null;
+        }
+
+        return \Carbon\Carbon::parse($value)->toDateString();
     }
 
     private function dateString($value): ?string

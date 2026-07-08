@@ -48,6 +48,10 @@ Route::group([
             'as' => 'seat-spy-hunter.caches.ip.destroy',
             'uses' => 'IntelCacheController@destroyIp',
         ]);
+        Route::post('/caches/vpn/process', [
+            'as' => 'seat-spy-hunter.caches.vpn.process',
+            'uses' => 'IntelCacheController@processVpnQueue',
+        ]);
         Route::delete('/caches/evewho/{member}', [
             'as' => 'seat-spy-hunter.caches.evewho.destroy',
             'uses' => 'IntelCacheController@destroyEveWhoMember',

@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Raikia\SeatSpyHunter\Models\EveWhoMember;
 use Raikia\SeatSpyHunter\Models\EveWhoQueue;
+use Raikia\SeatSpyHunter\Jobs\ProcessVpnLookupQueueJob;
 use Raikia\SeatSpyHunter\Jobs\RefreshEveWhoMemberEsiJob;
 use Raikia\SeatSpyHunter\Models\IntelEntity;
 use Raikia\SeatSpyHunter\Models\IpIntelligence;
@@ -75,6 +76,13 @@ class IntelCacheController extends Controller
         ]);
 
         return redirect()->route('seat-spy-hunter.caches')->with('success', 'IP cache entry deleted and queued for future lookup.');
+    }
+
+    public function processVpnQueue()
+    {
+        ProcessVpnLookupQueueJob::dispatch();
+
+        return redirect()->route('seat-spy-hunter.caches')->with('success', 'VPN lookup queue job dispatched. The worker will process pending VPNAPI.io lookups in the background.');
     }
 
     public function destroyEveWhoMember(EveWhoMember $member)
