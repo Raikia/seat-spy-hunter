@@ -271,9 +271,9 @@ class CharacterRiskAnalyzer
 
                 $evidence->push([
                     'category' => 'hostile_market_transaction',
-                    'score' => min(18, 6 + ($transactions * 2)),
+                    'score' => min(8, 2 + $transactions),
                     'title' => 'Market transactions with hostile entities',
-                    'details' => sprintf('%s has %d market transaction match%s involving hostile entities. This is lower concern because open-market trades may be incidental.',
+                    'details' => sprintf('%s has %d market transaction match%s involving hostile entities. This is a low concern contextual signal because open-market trades are often incidental.',
                         $character->name,
                         $transactions,
                         $transactions === 1 ? '' : 'es'

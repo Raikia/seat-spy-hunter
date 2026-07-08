@@ -59,7 +59,7 @@
             </div>
 
             <form method="GET" action="{{ route('seat-spy-hunter.index') }}" class="form-row align-items-end">
-                <div class="form-group col-md-3">
+                <div class="form-group col-md-2">
                     <label for="rating">Risk</label>
                     <select name="rating" id="rating" class="form-control">
                         <option value="">Any</option>
@@ -68,11 +68,28 @@
                         @endforeach
                     </select>
                 </div>
-                <div class="form-group col-md-6">
+                <div class="form-group col-md-3">
+                    <label for="evidence_category">Evidence</label>
+                    <select name="evidence_category" id="evidence_category" class="form-control">
+                        <option value="">Any</option>
+                        @foreach($evidenceCategories as $value => $label)
+                            <option value="{{ $value }}" {{ $evidenceCategory === $value ? 'selected' : '' }}>{{ $label }}</option>
+                        @endforeach
+                    </select>
+                </div>
+                <div class="form-group col-md-2">
+                    <label for="suppressed">Suppressed</label>
+                    <select name="suppressed" id="suppressed" class="form-control">
+                        <option value="">Any</option>
+                        <option value="with" {{ $suppressed === 'with' ? 'selected' : '' }}>Has hidden evidence</option>
+                        <option value="without" {{ $suppressed === 'without' ? 'selected' : '' }}>No hidden evidence</option>
+                    </select>
+                </div>
+                <div class="form-group col-md-3">
                     <label for="search">Search</label>
                     <input type="text" name="search" id="search" value="{{ $search }}" class="form-control" placeholder="User account, user ID, corporation, alliance">
                 </div>
-                <div class="form-group col-md-3">
+                <div class="form-group col-md-2">
                     <button type="submit" class="btn btn-secondary btn-block">
                         <i class="fas fa-filter"></i> Filter
                     </button>
@@ -94,6 +111,7 @@
                         <th>Hostile</th>
                         <th>IP</th>
                         <th>Account SP</th>
+                        <th>Updated</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -102,6 +120,9 @@
                         @php
                             $accountUserId = $report->account_user_id ?: $report->user_id;
                             $accountCharacters = data_get(optional($report->evidence->firstWhere('category', 'account_characters'))->meta, 'characters', []);
+                            $hasNewEvidence = (bool) $report->evidence->firstWhere('category', 'new_evidence_since_review');
+                            $hasSuppressedEvidence = (bool) $report->evidence->firstWhere('category', 'suppressed_signals');
+                            $freshnessDays = $report->last_analyzed_at ? $report->last_analyzed_at->diffInDays(now()) : null;
                         @endphp
                         <tr>
                             <td data-order="{{ strtolower($report->character_name ?: ('user ' . $accountUserId)) }}">
@@ -112,6 +133,12 @@
                                 <div class="mt-1">
                                     @php($reviewBadge = ['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'][$report->review_status] ?? 'secondary')
                                     <span class="badge badge-{{ $reviewBadge }}">{{ ucfirst($report->review_status ?: 'new') }}</span>
+                                    @if($hasNewEvidence)
+                                        <span class="badge badge-primary">New evidence</span>
+                                    @endif
+                                    @if($hasSuppressedEvidence)
+                                        <span class="badge badge-secondary">Suppressed</span>
+                                    @endif
                                 </div>
                             </td>
                             <td data-order="{{ count($accountCharacters) }}">
@@ -154,6 +181,18 @@
                                 {{ $report->skillpoints !== null ? number_format($report->skillpoints) : 'Unknown' }}<br>
                                 <small class="text-muted">{{ count($accountCharacters) }} monitored character{{ count($accountCharacters) === 1 ? '' : 's' }}</small>
                             </td>
+                            <td data-order="{{ optional($report->last_analyzed_at)->timestamp ?: 0 }}">
+                                @if($report->last_analyzed_at)
+                                    @if($freshnessDays !== null && $freshnessDays >= 14)
+                                        <span class="badge badge-warning">Stale</span>
+                                    @else
+                                        <span class="badge badge-success">Fresh</span>
+                                    @endif
+                                    <div class="small text-muted">{{ $report->last_analyzed_at->diffForHumans() }}</div>
+                                @else
+                                    <span class="badge badge-secondary">Never</span>
+                                @endif
+                            </td>
                             <td class="text-right">
                                 <button type="button" class="btn btn-outline-secondary btn-sm" data-toggle="modal" data-target="#intel-report-modal-{{ $report->id }}">
                                     <i class="fas fa-search"></i> Review
@@ -162,7 +201,7 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="9" class="text-center text-muted py-5">
+                            <td colspan="10" class="text-center text-muted py-5">
                                 No account spy hunter reports yet. Add monitored corporations or alliances in settings, then refresh reports.
                             </td>
                         </tr>
@@ -185,7 +224,7 @@
                 pageLength: 50,
                 lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
                 columnDefs: [
-                    { orderable: false, targets: [8] }
+                    { orderable: false, targets: [9] }
                 ]
             });
         });

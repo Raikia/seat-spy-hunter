@@ -14,7 +14,6 @@
         'recent_neutral_corporation_history' => 'Recent Neutral Corp',
         'corporation_history_churn' => 'Corp Churn',
         'quiet_corporation_history' => 'Quiet Corp History',
-        'shared_user_agent' => 'Shared Browser',
         'thin_seat_footprint' => 'Thin Footprint',
         'no_productive_footprint' => 'No PvE/Indy/Market',
         'age_skill_mismatch' => 'Age vs SP',
@@ -25,6 +24,7 @@
         'hostile_wallet' => 'Hostile Wallet',
         'hostile_wallet_direct' => 'Direct Wallet',
         'hostile_market_transaction' => 'Market Trade',
+        'new_evidence_since_review' => 'New Evidence',
         'shared_ip' => 'Shared IP',
         'vpn_ip' => 'VPN / Proxy',
         'missing_token' => 'Missing Token',
@@ -51,7 +51,6 @@
         'recent_neutral_corporation_history' => 'warning',
         'corporation_history_churn' => 'warning',
         'quiet_corporation_history' => 'secondary',
-        'shared_user_agent' => 'warning',
         'thin_seat_footprint' => 'info',
         'no_productive_footprint' => 'info',
         'age_skill_mismatch' => 'info',
@@ -62,6 +61,7 @@
         'hostile_wallet' => 'danger',
         'hostile_wallet_direct' => 'danger',
         'hostile_market_transaction' => 'warning',
+        'new_evidence_since_review' => 'primary',
         'shared_ip' => 'warning',
         'vpn_ip' => 'warning',
         'missing_token' => 'dark',
@@ -517,6 +517,9 @@
                             <div class="mb-2">
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_time_count', 0) }} same-time</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'different_time_count', 0) }} historical-only</span>
+                                <span class="badge badge-info">{{ data_get($evidence->meta, 'recent_count', 0) }} last 2 years</span>
+                                <span class="badge badge-primary">{{ data_get($evidence->meta, 'aging_count', 0) }} 2-5 years old</span>
+                                <span class="badge badge-secondary">{{ data_get($evidence->meta, 'old_count', 0) }} older than 5 years</span>
                             </div>
                             <div class="table-responsive mb-2">
                                 <table class="table table-sm table-bordered mb-0">
@@ -527,6 +530,7 @@
                                         <th>Corporation</th>
                                         <th>Monitored Dates</th>
                                         <th>Hostile Dates</th>
+                                        <th>Age</th>
                                         <th>Timing</th>
                                     </tr>
                                     </thead>
@@ -565,6 +569,14 @@
                                                 {{ data_get($match, 'hostile_end_date') ?: 'Current/Unknown' }}
                                             </td>
                                             <td>
+                                                @php($ageBucket = data_get($match, 'overlap_age_bucket', 'unknown'))
+                                                @php($ageBadge = ['recent' => 'info', 'aging' => 'secondary', 'old' => 'light', 'unknown' => 'secondary'][$ageBucket] ?? 'secondary')
+                                                <span class="badge badge-{{ $ageBadge }}">{{ ucfirst($ageBucket) }}</span>
+                                                <div class="small text-muted">
+                                                    Last relevant: {{ data_get($match, 'overlap_last_seen_date') ?: 'Unknown' }}
+                                                </div>
+                                            </td>
+                                            <td>
                                                 @if(data_get($match, 'same_time'))
                                                     <span class="badge badge-danger">Same time</span>
                                                 @else
@@ -572,46 +584,6 @@
                                                 @endif
                                             </td>
                                         </tr>
-                                    @endforeach
-                                    </tbody>
-                                </table>
-                            </div>
-                        @endif
-                        @if($evidence->category === 'shared_user_agent' && !empty(data_get($evidence->meta, 'shared_users')))
-                            <div class="table-responsive mb-2">
-                                <table class="table table-sm table-bordered mb-0">
-                                    <thead>
-                                    <tr>
-                                        <th>User</th>
-                                        <th>Matched User Agent</th>
-                                        <th>Last Seen</th>
-                                    </tr>
-                                    </thead>
-                                    <tbody>
-                                    @foreach(data_get($evidence->meta, 'shared_users', []) as $sharedUser)
-                                        @forelse(data_get($sharedUser, 'user_agents', []) as $agent)
-                                            <tr>
-                                                <td>
-                                                    <a href="{{ route('seatcore::configuration.users.edit', ['user_id' => data_get($sharedUser, 'user_id')]) }}">
-                                                        User #{{ data_get($sharedUser, 'user_id') }}
-                                                    </a>
-                                                </td>
-                                                <td>
-                                                    <code class="small text-wrap" style="white-space: normal;">{{ data_get($agent, 'user_agent') }}</code>
-                                                </td>
-                                                <td>{{ data_get($agent, 'last_seen_at') ?: data_get($sharedUser, 'last_seen_at', 'Unknown') }}</td>
-                                            </tr>
-                                        @empty
-                                            <tr>
-                                                <td>
-                                                    <a href="{{ route('seatcore::configuration.users.edit', ['user_id' => data_get($sharedUser, 'user_id')]) }}">
-                                                        User #{{ data_get($sharedUser, 'user_id') }}
-                                                    </a>
-                                                </td>
-                                                <td><span class="text-muted">Matched user agent not captured</span></td>
-                                                <td>{{ data_get($sharedUser, 'last_seen_at', 'Unknown') }}</td>
-                                            </tr>
-                                        @endforelse
                                     @endforeach
                                     </tbody>
                                 </table>

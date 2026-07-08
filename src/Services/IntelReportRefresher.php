@@ -17,12 +17,14 @@ class IntelReportRefresher
     private $analyzer;
     private $hostileContacts;
     private $eveWho;
+    private $settings;
 
-    public function __construct(CharacterRiskAnalyzer $analyzer, HostileContactResolver $hostileContacts, EveWhoService $eveWho)
+    public function __construct(CharacterRiskAnalyzer $analyzer, HostileContactResolver $hostileContacts, EveWhoService $eveWho, IntelSettings $settings)
     {
         $this->analyzer = $analyzer;
         $this->hostileContacts = $hostileContacts;
         $this->eveWho = $eveWho;
+        $this->settings = $settings;
     }
 
     public function refresh(): int
@@ -34,7 +36,8 @@ class IntelReportRefresher
                 ->filter(fn ($character) => optional($character->user)->id)
                 ->groupBy(fn ($character) => optional($character->user)->id);
             $previousReviews = CharacterIntelReport::query()
-                ->get(['account_user_id', 'user_id', 'review_status', 'review_notes', 'reviewed_by', 'reviewed_at'])
+                ->with('evidence')
+                ->get(['id', 'account_user_id', 'user_id', 'review_status', 'review_notes', 'reviewed_by', 'reviewed_at'])
                 ->keyBy(fn ($report) => (int) ($report->account_user_id ?: $report->user_id));
             $count = 0;
 
@@ -72,8 +75,15 @@ class IntelReportRefresher
                 $primaryCharacter = $this->primaryCharacter($user, $scoredCharacters);
                 $affiliation = optional($primaryCharacter)->affiliation;
                 $previousReview = $previousReviews->get((int) $user->id);
+                $newEvidenceSinceReview = $this->newEvidenceSinceReviewEvidence($previousReview, $evidence);
+                $reviewWorkflow = $this->reviewWorkflowAttributes($previousReview, (bool) $newEvidenceSinceReview);
+
+                if ($newEvidenceSinceReview) {
+                    $evidence->push($newEvidenceSinceReview);
+                }
+
                 $riskSignalCount = $evidence
-                    ->reject(fn ($row) => in_array($row['category'], ['account_connectors', 'multi_character_account']))
+                    ->reject(fn ($row) => in_array($row['category'], ['account_connectors', 'multi_character_account', 'new_evidence_since_review']))
                     ->where('score', '>', 0)
                     ->count();
 
@@ -96,10 +106,10 @@ class IntelReportRefresher
                     'skillpoints' => $scoredCharacters->sum(fn ($character) => (int) optional($character->skillpoints)->total_sp),
                     'birthday' => $this->oldestBirthday($scoredCharacters),
                     'last_analyzed_at' => now(),
-                    'review_status' => $previousReview ? $previousReview->review_status : 'new',
-                    'review_notes' => $previousReview ? $previousReview->review_notes : null,
-                    'reviewed_by' => $previousReview ? $previousReview->reviewed_by : null,
-                    'reviewed_at' => $previousReview ? $previousReview->reviewed_at : null,
+                    'review_status' => $reviewWorkflow['review_status'],
+                    'review_notes' => $reviewWorkflow['review_notes'],
+                    'reviewed_by' => $reviewWorkflow['reviewed_by'],
+                    'reviewed_at' => $reviewWorkflow['reviewed_at'],
                 ];
 
                 if (Schema::hasColumn('seat_spy_hunter_character_reports', 'account_user_id')) {
@@ -136,6 +146,34 @@ class IntelReportRefresher
         ];
     }
 
+    private function reviewWorkflowAttributes(?CharacterIntelReport $previousReview, bool $hasNewEvidence): array
+    {
+        if (!$previousReview) {
+            return [
+                'review_status' => 'new',
+                'review_notes' => null,
+                'reviewed_by' => null,
+                'reviewed_at' => null,
+            ];
+        }
+
+        if ($hasNewEvidence && $this->settings->reopenReviewOnNewEvidence() && in_array($previousReview->review_status, ['cleared', 'watchlisted'], true)) {
+            return [
+                'review_status' => 'reviewing',
+                'review_notes' => $previousReview->review_notes,
+                'reviewed_by' => null,
+                'reviewed_at' => null,
+            ];
+        }
+
+        return [
+            'review_status' => $previousReview->review_status,
+            'review_notes' => $previousReview->review_notes,
+            'reviewed_by' => $previousReview->reviewed_by,
+            'reviewed_at' => $previousReview->reviewed_at,
+        ];
+    }
+
     private function suppressedCategories(int $accountUserId)
     {
         return FalsePositiveSuppression::query()
@@ -164,6 +202,75 @@ class IntelReportRefresher
                 ])->values()->all(),
             ],
         ];
+    }
+
+    private function newEvidenceSinceReviewEvidence(?CharacterIntelReport $previousReport, $currentEvidence): ?array
+    {
+        if (!$previousReport || !$previousReport->reviewed_at) {
+            return null;
+        }
+
+        $ignoredCategories = ['account_characters', 'account_connectors', 'suppressed_signals', 'new_evidence_since_review'];
+        $previousFingerprints = $previousReport->evidence
+            ->reject(fn ($row) => in_array($row->category, $ignoredCategories))
+            ->map(fn ($row) => $this->evidenceFingerprint([
+                'category' => $row->category,
+                'title' => $row->title,
+                'details' => $row->details,
+                'meta' => $row->meta,
+            ]))
+            ->unique()
+            ->flip();
+
+        $newRows = $currentEvidence
+            ->reject(fn ($row) => in_array($row['category'], $ignoredCategories))
+            ->reject(fn ($row) => $previousFingerprints->has($this->evidenceFingerprint($row)))
+            ->values();
+
+        if ($newRows->isEmpty()) {
+            return null;
+        }
+
+        return [
+            'category' => 'new_evidence_since_review',
+            'score' => 0,
+            'title' => 'New evidence since last review',
+            'details' => sprintf('%d evidence item%s changed or appeared since this account was last reviewed.',
+                $newRows->count(),
+                $newRows->count() === 1 ? '' : 's'
+            ),
+            'meta' => [
+                'reviewed_at' => $this->dateString($previousReport->reviewed_at),
+                'new_items' => $newRows->map(fn ($row) => [
+                    'category' => $row['category'],
+                    'title' => $row['title'],
+                    'score' => $row['score'],
+                ])->values()->all(),
+            ],
+        ];
+    }
+
+    private function evidenceFingerprint(array $row): string
+    {
+        return sha1(json_encode([
+            'category' => $row['category'] ?? null,
+            'title' => $row['title'] ?? null,
+            'details' => $row['details'] ?? null,
+            'meta' => $this->stableEvidenceMeta($row['meta'] ?? []),
+        ], JSON_UNESCAPED_SLASHES));
+    }
+
+    private function stableEvidenceMeta($meta)
+    {
+        $meta = is_array($meta) ? $meta : [];
+
+        foreach (['latest_received', 'latest_sent', 'latest_journal', 'latest_transactions', 'login_ips'] as $volatileKey) {
+            unset($meta[$volatileKey]);
+        }
+
+        ksort($meta);
+
+        return $meta;
     }
 
     private function accountScopedCharacterEvidence($analyses)
@@ -307,7 +414,6 @@ class IntelReportRefresher
         }
 
         $this->addCorporationHistoryEvidence($user, $characterIds, $hostileEntityIds, $evidence);
-        $this->addSharedUserAgentEvidence($user, $evidence);
         $this->addEmploymentOverlapEvidence($user, $characterIds, $evidence);
         $this->addFootprintEvidence($user, $characters, $characterIds, $hostileEntityIds, $evidence);
         $this->addWalletAccountEvidence($user, $characterIds, $evidence);
@@ -531,9 +637,9 @@ class IntelReportRefresher
         if ($historyCount > 0 && $recentHistoryCount === 0) {
             $evidence->push([
                 'category' => 'quiet_corporation_history',
-                'score' => 3,
+                'score' => 0,
                 'title' => 'No recent corporation movement',
-                'details' => sprintf('%s has no corporation-history changes in the last 180 days. This is only a small contextual signal.', $user->name),
+                'details' => sprintf('%s has no corporation-history changes in the last 180 days. This is context only and does not add suspicion points.', $user->name),
                 'meta' => [
                     'history_count' => $historyCount,
                     'unique_corporation_count' => $uniqueCorporationCount,
@@ -542,73 +648,6 @@ class IntelReportRefresher
                 ],
             ]);
         }
-    }
-
-    private function addSharedUserAgentEvidence(User $user, $evidence): void
-    {
-        if (!Schema::hasTable('user_login_histories')) {
-            return;
-        }
-
-        $agents = DB::table('user_login_histories')
-            ->where('user_id', $user->id)
-            ->whereNotNull('user_agent')
-            ->where('user_agent', '<>', '')
-            ->pluck('user_agent')
-            ->unique()
-            ->values();
-
-        if ($agents->isEmpty()) {
-            return;
-        }
-
-        $sharedUsers = DB::table('user_login_histories')
-            ->whereIn('user_agent', $agents->all())
-            ->where('user_id', '<>', $user->id)
-            ->whereNotNull('user_id')
-            ->select('user_id', DB::raw('count(distinct user_agent) as shared_agent_count'), DB::raw('max(created_at) as last_seen_at'))
-            ->groupBy('user_id')
-            ->get();
-
-        if ($sharedUsers->isEmpty()) {
-            return;
-        }
-
-        $matchedAgents = DB::table('user_login_histories')
-            ->whereIn('user_id', $sharedUsers->pluck('user_id')->all())
-            ->whereIn('user_agent', $agents->all())
-            ->whereNotNull('user_agent')
-            ->where('user_agent', '<>', '')
-            ->select('user_id', 'user_agent', DB::raw('max(created_at) as last_seen_at'))
-            ->groupBy('user_id', 'user_agent')
-            ->get()
-            ->groupBy('user_id');
-
-        $evidence->push([
-            'category' => 'shared_user_agent',
-            'score' => min(25, 10 + (($sharedUsers->count() - 1) * 3)),
-            'title' => 'Shares browser/device fingerprints with other SeAT users',
-            'details' => sprintf('%s has login user-agent strings also seen on %d other SeAT user account%s.',
-                $user->name,
-                $sharedUsers->count(),
-                $sharedUsers->count() === 1 ? '' : 's'
-            ),
-            'meta' => [
-                'shared_users' => $sharedUsers->map(fn ($row) => [
-                    'user_id' => (int) $row->user_id,
-                    'shared_agent_count' => (int) $row->shared_agent_count,
-                    'last_seen_at' => $this->dateString($row->last_seen_at),
-                    'user_agents' => $matchedAgents
-                        ->get($row->user_id, collect())
-                        ->map(fn ($agent) => [
-                            'user_agent' => $agent->user_agent,
-                            'last_seen_at' => $this->dateString($agent->last_seen_at),
-                        ])
-                        ->values()
-                        ->all(),
-                ])->values()->all(),
-            ],
-        ]);
     }
 
     private function addEmploymentOverlapEvidence(User $user, $characterIds, $evidence): void
@@ -620,9 +659,21 @@ class IntelReportRefresher
         }
 
         $sameTime = $overlaps->where('same_time', true);
-        $score = $sameTime->isNotEmpty()
-            ? min(45, 30 + (($sameTime->count() - 1) * 4))
-            : min(25, 12 + (($overlaps->count() - 1) * 2));
+        $recent = $overlaps->where('overlap_age_bucket', 'recent');
+        $aging = $overlaps->where('overlap_age_bucket', 'aging');
+        $old = $overlaps->where('overlap_age_bucket', 'old');
+        $unknownAge = $overlaps->where('overlap_age_bucket', 'unknown');
+        $score = min(45,
+            ($recent->where('same_time', true)->count() * 12)
+            + ($recent->where('same_time', false)->count() * 7)
+            + ($aging->where('same_time', true)->count() * 6)
+            + ($aging->where('same_time', false)->count() * 3)
+            + ($old->where('same_time', true)->count() * 2)
+            + ($old->where('same_time', false)->count() * 1)
+            + ($unknownAge->where('same_time', true)->count() * 4)
+            + ($unknownAge->where('same_time', false)->count() * 2)
+        );
+        $score = max($sameTime->isNotEmpty() ? 4 : 2, $score);
 
         $evidence->push([
             'category' => 'hostile_employment_overlap',
@@ -635,6 +686,11 @@ class IntelReportRefresher
             'meta' => [
                 'same_time_count' => $sameTime->count(),
                 'different_time_count' => $overlaps->count() - $sameTime->count(),
+                'recent_count' => $recent->count(),
+                'aging_count' => $aging->count(),
+                'old_count' => $old->count(),
+                'unknown_age_count' => $unknownAge->count(),
+                'recency_window_days' => 730,
                 'matches' => $overlaps->take(20)->values()->all(),
             ],
         ]);

@@ -97,6 +97,19 @@
                         </div>
                     </div>
                     <div class="col-lg-5">
+                        <h6 class="text-muted text-uppercase small mb-3">Review workflow</h6>
+                        <div class="border rounded p-3 mb-3">
+                            <div class="custom-control custom-switch">
+                                <input type="checkbox" name="reopen_review_on_new_evidence" value="1" class="custom-control-input" id="reopen_review_on_new_evidence" {{ $settings->reopenReviewOnNewEvidence() ? 'checked' : '' }}>
+                                <label class="custom-control-label" for="reopen_review_on_new_evidence">
+                                    Reopen reviewed accounts when new evidence appears
+                                </label>
+                            </div>
+                            <div class="small text-muted mt-2">
+                                When enabled, a report refresh that finds new evidence after the last review moves the account back to Reviewing and clears the previous reviewed timestamp.
+                            </div>
+                        </div>
+
                         <h6 class="text-muted text-uppercase small mb-3">IP intelligence</h6>
                         <div class="form-row">
                             <div class="form-group col-md-5">

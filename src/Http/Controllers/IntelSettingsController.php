@@ -62,6 +62,7 @@ class IntelSettingsController extends Controller
             'vpn_score' => 'required|integer|min:0|max:100',
             'ip_provider' => 'nullable|string|max:100',
             'ip_provider_key' => 'nullable|string|max:255',
+            'reopen_review_on_new_evidence' => 'nullable|boolean',
         ]);
 
         $settings->setLowSkillpointThreshold((int) $data['low_skillpoint_threshold']);
@@ -71,6 +72,7 @@ class IntelSettingsController extends Controller
         $settings->setVpnScore((int) $data['vpn_score']);
         $settings->setIpProvider($data['ip_provider'] ?? null);
         $settings->setIpProviderKey($data['ip_provider_key'] ?? null);
+        $settings->setReopenReviewOnNewEvidence($request->boolean('reopen_review_on_new_evidence'));
 
         return redirect()->route('seat-spy-hunter.settings')->with('success', 'Spy Hunter settings updated successfully.');
     }

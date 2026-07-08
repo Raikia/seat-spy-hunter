@@ -195,6 +195,8 @@ class EveWhoService
                 ->map(function ($hostile) use ($local, $hostileMembers, $characterNames) {
                     $member = $hostileMembers->get((int) $hostile->character_id, collect())->first();
                     $sameTime = $this->dateRangesOverlap($local->start_date, $local->end_date, $hostile->start_date, $hostile->end_date);
+                    $lastRelevantDate = $this->overlapLastRelevantDate($local->start_date, $local->end_date, $hostile->start_date, $hostile->end_date, $sameTime);
+                    $ageDays = $lastRelevantDate ? now()->diffInDays($lastRelevantDate) : null;
 
                     return [
                         'character_id' => (int) $local->character_id,
@@ -208,11 +210,16 @@ class EveWhoService
                         'local_end_date' => $this->dateString($local->end_date),
                         'hostile_start_date' => $this->dateString($hostile->start_date),
                         'hostile_end_date' => $this->dateString($hostile->end_date),
+                        'overlap_last_seen_date' => $this->dateString($lastRelevantDate),
+                        'overlap_age_days' => $ageDays,
+                        'overlap_age_bucket' => $this->overlapAgeBucket($ageDays),
                         'source_entity_type' => $member ? $member->source_entity_type : null,
                         'source_entity_id' => $member ? $member->source_entity_id : null,
                     ];
                 });
-        })->values();
+        })
+            ->sortByDesc(fn (array $match) => $match['overlap_last_seen_date'] ? strtotime($match['overlap_last_seen_date']) : 0)
+            ->values();
     }
 
     private function fetchListPage(string $entityType, int $entityId, int $page): ?array
@@ -346,6 +353,40 @@ class EveWhoService
         }
 
         return $ignoredCorporationIds->contains($corporationId);
+    }
+
+    private function overlapLastRelevantDate($localStart, $localEnd, $hostileStart, $hostileEnd, bool $sameTime)
+    {
+        $localStart = $localStart ? \Carbon\Carbon::parse($localStart) : null;
+        $localEnd = $localEnd ? \Carbon\Carbon::parse($localEnd) : now();
+        $hostileStart = $hostileStart ? \Carbon\Carbon::parse($hostileStart) : null;
+        $hostileEnd = $hostileEnd ? \Carbon\Carbon::parse($hostileEnd) : now();
+
+        if ($sameTime) {
+            return collect([$localEnd, $hostileEnd])->filter()->sort()->first();
+        }
+
+        return collect([$localStart, $localEnd, $hostileStart, $hostileEnd])
+            ->filter()
+            ->sortDesc()
+            ->first();
+    }
+
+    private function overlapAgeBucket(?int $ageDays): string
+    {
+        if ($ageDays === null) {
+            return 'unknown';
+        }
+
+        if ($ageDays <= 730) {
+            return 'recent';
+        }
+
+        if ($ageDays <= 1825) {
+            return 'aging';
+        }
+
+        return 'old';
     }
 
     private function monitoredCorporationIds(): Collection

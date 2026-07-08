@@ -15,6 +15,7 @@ class IntelSettings
     const IP_PROVIDER = 'ip_provider';
     const IP_PROVIDER_KEY = 'ip_provider_key';
     const IP_PROVIDER_LIMITED_UNTIL = 'ip_provider_limited_until';
+    const REOPEN_REVIEW_ON_NEW_EVIDENCE = 'reopen_review_on_new_evidence';
 
     const DEFAULT_LOW_SKILLPOINT_THRESHOLD = 5000000;
     const DEFAULT_NEW_CHARACTER_DAYS = 60;
@@ -104,6 +105,16 @@ class IntelSettings
         $this->set(self::IP_PROVIDER_LIMITED_UNTIL, $limited_until->toIso8601String());
     }
 
+    public function reopenReviewOnNewEvidence(): bool
+    {
+        return $this->boolean(self::REOPEN_REVIEW_ON_NEW_EVIDENCE, false);
+    }
+
+    public function setReopenReviewOnNewEvidence(bool $value): void
+    {
+        $this->set(self::REOPEN_REVIEW_ON_NEW_EVIDENCE, $value ? '1' : '0');
+    }
+
     private function integer(string $key, int $default, int $minimum): int
     {
         $setting = IntelSetting::find($key);
@@ -117,6 +128,17 @@ class IntelSettings
         $setting = IntelSetting::find($key);
 
         return $setting && filled($setting->value) ? $setting->value : null;
+    }
+
+    private function boolean(string $key, bool $default): bool
+    {
+        $setting = IntelSetting::find($key);
+
+        if (!$setting) {
+            return $default;
+        }
+
+        return filter_var($setting->value, FILTER_VALIDATE_BOOLEAN);
     }
 
     private function set(string $key, ?string $value): void
