@@ -13,6 +13,8 @@ use Seat\Eveapi\Bus\Character as CharacterBus;
 
 class EveWhoService
 {
+    private const PLAYER_CORPORATION_ID_FLOOR = 90000000;
+
     private const STARTER_NPC_CORPORATION_IDS = [
         1000166, // Imperial Academy
         1000167, // State War Academy
@@ -149,7 +151,7 @@ class EveWhoService
 
         $ignoredCorporationIds = $this->ignoredEmploymentCorporationIds();
         $localHistories = $this->localEmploymentHistories($characterIds)
-            ->reject(fn ($row) => $ignoredCorporationIds->contains((int) $row->corporation_id))
+            ->reject(fn ($row) => $this->isIgnoredEmploymentCorporation((int) $row->corporation_id, $ignoredCorporationIds))
             ->values();
 
         if ($localHistories->isEmpty()) {
@@ -178,7 +180,7 @@ class EveWhoService
             ->groupBy('character_id');
 
         $hostileHistories = $this->employmentHistories($hostileCharacterIds, $corporationIds)
-            ->reject(fn ($row) => $ignoredCorporationIds->contains((int) $row->corporation_id))
+            ->reject(fn ($row) => $this->isIgnoredEmploymentCorporation((int) $row->corporation_id, $ignoredCorporationIds))
             ->values();
 
         if ($hostileHistories->isEmpty()) {
@@ -331,6 +333,19 @@ class EveWhoService
             ->map(fn ($id) => (int) $id)
             ->unique()
             ->values();
+    }
+
+    private function isIgnoredEmploymentCorporation(int $corporationId, Collection $ignoredCorporationIds): bool
+    {
+        if (!$corporationId) {
+            return true;
+        }
+
+        if ($corporationId < self::PLAYER_CORPORATION_ID_FLOOR) {
+            return true;
+        }
+
+        return $ignoredCorporationIds->contains($corporationId);
     }
 
     private function monitoredCorporationIds(): Collection

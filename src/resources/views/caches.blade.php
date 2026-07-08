@@ -120,6 +120,13 @@
                         <i class="fas fa-sync-alt"></i> Force Monthly ESI Refresh
                     </button>
                 </form>
+                <form method="POST" action="{{ route('seat-spy-hunter.caches.evewho.clear') }}" class="d-inline" onsubmit="return confirm('Delete all cached EveWho members and queue configured hostile groups for re-sync?');">
+                    {{ csrf_field() }}
+                    {{ method_field('DELETE') }}
+                    <button type="submit" class="btn btn-sm btn-outline-danger">
+                        <i class="fas fa-trash"></i> Clear EveWho Cache
+                    </button>
+                </form>
             </div>
         </div>
         <div class="card-body">

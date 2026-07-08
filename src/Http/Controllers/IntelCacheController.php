@@ -106,6 +106,30 @@ class IntelCacheController extends Controller
         return redirect()->route('seat-spy-hunter.caches')->with('success', 'Monthly EveWho member ESI refresh queued in batches. The worker will process a small group, pause, then continue in the background.');
     }
 
+    public function destroyEveWhoCache()
+    {
+        $deleted = EveWhoMember::query()->delete();
+
+        IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_HOSTILE)
+            ->whereIn('entity_type', ['corporation', 'alliance'])
+            ->get()
+            ->each(function (IntelEntity $entity) {
+                EveWhoQueue::query()->updateOrCreate([
+                    'entity_type' => $entity->entity_type,
+                    'entity_id' => (int) $entity->entity_id,
+                    'page' => 1,
+                ], [
+                    'status' => 'pending',
+                    'available_at' => now(),
+                    'processed_at' => null,
+                    'last_error' => null,
+                ]);
+            });
+
+        return redirect()->route('seat-spy-hunter.caches')->with('success', $deleted . ' EveWho cache entr' . ($deleted === 1 ? 'y' : 'ies') . ' deleted. Configured hostile groups were queued for re-sync.');
+    }
+
     private function escapeLike(string $value): string
     {
         return addcslashes($value, '\\%_');

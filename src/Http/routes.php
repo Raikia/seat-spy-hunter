@@ -52,6 +52,10 @@ Route::group([
             'as' => 'seat-spy-hunter.caches.evewho.destroy',
             'uses' => 'IntelCacheController@destroyEveWhoMember',
         ]);
+        Route::delete('/caches/evewho/clear', [
+            'as' => 'seat-spy-hunter.caches.evewho.clear',
+            'uses' => 'IntelCacheController@destroyEveWhoCache',
+        ]);
         Route::post('/caches/evewho/refresh-esi', [
             'as' => 'seat-spy-hunter.caches.evewho.refresh-esi',
             'uses' => 'IntelCacheController@refreshEveWhoMemberEsi',
