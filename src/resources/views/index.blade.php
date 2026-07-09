@@ -4,6 +4,20 @@
 @section('page_header', 'Spy Hunter')
 
 @section('content')
+    <style>
+        #spy-hunter-bulk-review-form .spy-hunter-bulk-status {
+            min-width: 190px;
+        }
+
+        #spy-hunter-bulk-review-form .spy-hunter-updated-at {
+            color: inherit;
+            font-size: 0.95rem;
+            line-height: 1.35;
+            margin-top: 0.25rem;
+            white-space: nowrap;
+        }
+    </style>
+
     <div class="card mb-4">
         <div class="card-body">
             <div class="d-flex justify-content-between align-items-start flex-wrap">
@@ -71,7 +85,7 @@
                 <div class="form-group col-md-2">
                     <label for="review_status">Review</label>
                     <select name="review_status" id="review_status" class="form-control">
-                        @foreach(['active' => 'Active Queue', 'new' => 'New', 'reviewing' => 'Reviewing', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated', 'cleared' => 'Cleared', 'all' => 'All'] as $value => $label)
+                        @foreach(['active' => 'Active Queue', 'new' => 'New', 'reviewing' => 'Reviewing', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'all' => 'All'] as $value => $label)
                             <option value="{{ $value }}" {{ $reviewStatus === $value ? 'selected' : '' }}>{{ $label }}</option>
                         @endforeach
                     </select>
@@ -106,25 +120,53 @@
         </div>
     </div>
 
-    <div class="card">
-        <div class="card-body table-responsive p-0">
-            <table id="spy-hunter-reports-table" class="table table-hover mb-0">
-                <thead>
-                    <tr>
-                        <th>User Account</th>
-                        <th>Monitored Characters</th>
-                        <th>Primary Group</th>
-                        <th>Risk</th>
-                        <th>Signals</th>
-                        <th>Hostile</th>
-                        <th>IP</th>
-                        <th>Account SP</th>
-                        <th>Updated</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @forelse($reports as $report)
+    <form method="POST" action="{{ route('seat-spy-hunter.reports.bulk-review') }}" id="spy-hunter-bulk-review-form">
+        {{ csrf_field() }}
+        <div class="card">
+            <div class="card-header py-2">
+                <div class="d-flex align-items-center flex-wrap">
+                    <strong class="mr-3 mb-2 mb-md-0">Bulk Review</strong>
+                    <div class="mr-2 mb-2 mb-md-0">
+                        <label for="bulk_review_status" class="sr-only">Bulk Status</label>
+                        <select name="review_status" id="bulk_review_status" class="form-control form-control-sm spy-hunter-bulk-status">
+                            @foreach(['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'] as $value => $label)
+                                <option value="{{ $value }}">{{ $label }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div class="flex-grow-1 mr-md-2 mb-2 mb-md-0">
+                        <label for="bulk_review_notes" class="sr-only">Bulk Note</label>
+                        <input type="text" name="review_notes" id="bulk_review_notes" class="form-control form-control-sm" maxlength="5000" placeholder="Optional note applied to every selected account">
+                    </div>
+                    <div class="d-flex align-items-center mb-2 mb-md-0">
+                        <span class="badge badge-secondary mr-2"><span id="bulk_review_selected_count">0</span> selected</span>
+                        <button type="submit" class="btn btn-primary btn-sm" id="bulk_review_submit" disabled>
+                            <i class="fas fa-check-square"></i> Update Selected
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body table-responsive p-0">
+                <table id="spy-hunter-reports-table" class="table table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th class="text-center">
+                                <input type="checkbox" id="spy-hunter-select-all" aria-label="Select all visible reports">
+                            </th>
+                            <th>User Account</th>
+                            <th>Monitored Characters</th>
+                            <th>Primary Group</th>
+                            <th>Risk</th>
+                            <th>Signals</th>
+                            <th>Hostile</th>
+                            <th>IP</th>
+                            <th>Account SP</th>
+                            <th>Updated</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @forelse($reports as $report)
                         @php
                             $accountUserId = $report->account_user_id ?: $report->user_id;
                             $accountCharacters = data_get(optional($report->evidence->firstWhere('category', 'account_characters'))->meta, 'characters', []);
@@ -133,6 +175,9 @@
                             $freshnessDays = $report->last_analyzed_at ? $report->last_analyzed_at->diffInDays(now()) : null;
                         @endphp
                         <tr>
+                            <td class="text-center" data-order="0">
+                                <input type="checkbox" name="report_ids[]" value="{{ $report->id }}" class="spy-hunter-report-checkbox" aria-label="Select {{ $report->character_name ?: ('User #' . $accountUserId) }}">
+                            </td>
                             <td data-order="{{ strtolower($report->character_name ?: ('user ' . $accountUserId)) }}">
                                 <a href="{{ route('seatcore::configuration.users.edit', ['user_id' => $accountUserId]) }}">
                                     <strong>{{ $report->character_name ?: ('User #' . $accountUserId) }}</strong>
@@ -140,9 +185,10 @@
                                 <small class="text-muted">User #{{ $accountUserId }}</small>
                                 <div class="mt-1">
                                     @php
-                                        $reviewBadge = data_get(['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'], $report->review_status, 'secondary');
+                                        $reviewLabels = ['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'];
+                                        $reviewBadge = data_get(['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'permanently_cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'], $report->review_status, 'secondary');
                                     @endphp
-                                    <span class="badge badge-{{ $reviewBadge }}">{{ ucfirst($report->review_status ?: 'new') }}</span>
+                                    <span class="badge badge-{{ $reviewBadge }}">{{ $reviewLabels[$report->review_status] ?? ucfirst($report->review_status ?: 'new') }}</span>
                                     @if($hasNewEvidence)
                                         <span class="badge badge-primary">New evidence</span>
                                     @endif
@@ -200,7 +246,7 @@
                                     @else
                                         <span class="badge badge-success">Fresh</span>
                                     @endif
-                                    <div class="small text-muted">{{ $report->last_analyzed_at->diffForHumans() }}</div>
+                                    <div class="spy-hunter-updated-at">{{ $report->last_analyzed_at->diffForHumans() }}</div>
                                 @else
                                     <span class="badge badge-secondary">Never</span>
                                 @endif
@@ -213,15 +259,16 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="10" class="text-center text-muted py-5">
+                            <td colspan="11" class="text-center text-muted py-5">
                                 No account spy hunter reports yet. Add monitored corporations or alliances in settings, then refresh reports.
                             </td>
                         </tr>
                     @endforelse
-                </tbody>
-            </table>
+                    </tbody>
+                </table>
+            </div>
         </div>
-    </div>
+    </form>
 
     @foreach($reports as $report)
         @include('seat-spy-hunter::partials.report-modal', ['report' => $report])
@@ -231,13 +278,44 @@
 @push('javascript')
     <script>
         $(function () {
-            $('#spy-hunter-reports-table').DataTable({
-                order: [[3, 'desc']],
+            var reportsTable = $('#spy-hunter-reports-table').DataTable({
+                order: [[4, 'desc']],
                 pageLength: 50,
                 lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
                 columnDefs: [
-                    { orderable: false, targets: [9] }
+                    { orderable: false, searchable: false, targets: [0, 10] }
                 ]
+            });
+
+            function updateBulkReviewControls() {
+                var selectedCount = $('.spy-hunter-report-checkbox:checked').length;
+
+                $('#bulk_review_selected_count').text(selectedCount);
+                $('#bulk_review_submit').prop('disabled', selectedCount === 0);
+
+                var visibleCheckboxes = reportsTable.rows({ search: 'applied' }).nodes().to$().find('.spy-hunter-report-checkbox');
+                var visibleSelectedCount = visibleCheckboxes.filter(':checked').length;
+
+                $('#spy-hunter-select-all')
+                    .prop('checked', visibleCheckboxes.length > 0 && visibleSelectedCount === visibleCheckboxes.length)
+                    .prop('indeterminate', visibleSelectedCount > 0 && visibleSelectedCount < visibleCheckboxes.length);
+            }
+
+            $('#spy-hunter-select-all').on('change', function () {
+                reportsTable.rows({ search: 'applied' }).nodes().to$()
+                    .find('.spy-hunter-report-checkbox')
+                    .prop('checked', this.checked);
+
+                updateBulkReviewControls();
+            });
+
+            $('#spy-hunter-reports-table').on('change', '.spy-hunter-report-checkbox', updateBulkReviewControls);
+            reportsTable.on('draw', updateBulkReviewControls);
+
+            $('#spy-hunter-bulk-review-form').on('submit', function (event) {
+                if ($('.spy-hunter-report-checkbox:checked').length === 0) {
+                    event.preventDefault();
+                }
             });
         });
     </script>

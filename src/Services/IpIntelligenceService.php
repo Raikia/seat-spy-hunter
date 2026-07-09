@@ -92,20 +92,24 @@ class IpIntelligenceService
         return $processed;
     }
 
-    public function queueKnownLoginIps(int $limit = 5000): int
+    public function queueKnownLoginIps(?int $limit = 5000): int
     {
         if (!$this->isVpnApiConfigured() || !Schema::hasTable('user_login_histories')) {
             return 0;
         }
 
-        $ips = DB::table('user_login_histories')
+        $query = DB::table('user_login_histories')
             ->whereNotNull('source')
             ->where('source', '<>', '')
             ->select('source')
             ->groupBy('source')
-            ->orderBy('source')
-            ->limit($limit)
-            ->pluck('source');
+            ->orderBy('source');
+
+        if ($limit !== null) {
+            $query->limit($limit);
+        }
+
+        $ips = $query->pluck('source');
 
         return $this->queuePublicIps($ips);
     }

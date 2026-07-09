@@ -8,6 +8,7 @@ use Raikia\SeatSpyHunter\Models\CharacterIntelReport;
 use Raikia\SeatSpyHunter\Models\FalsePositiveSuppression;
 use Raikia\SeatSpyHunter\Models\IntelEntity;
 use Raikia\SeatSpyHunter\Models\IpIntelligence;
+use Raikia\SeatSpyHunter\Models\VpnLookupQueue;
 use Seat\Eveapi\Models\RefreshToken;
 use Seat\Eveapi\Models\Character\CharacterInfo;
 use Seat\Eveapi\Models\Wallet\CharacterWalletJournal;
@@ -158,6 +159,15 @@ class IntelReportRefresher
                 'review_notes' => null,
                 'reviewed_by' => null,
                 'reviewed_at' => null,
+            ];
+        }
+
+        if ($previousReview->review_status === 'permanently_cleared') {
+            return [
+                'review_status' => 'permanently_cleared',
+                'review_notes' => $previousReview->review_notes,
+                'reviewed_by' => $previousReview->reviewed_by,
+                'reviewed_at' => $previousReview->reviewed_at,
             ];
         }
 
@@ -368,9 +378,14 @@ class IntelReportRefresher
             ->whereIn('ip', $rows->pluck('source')->all())
             ->get()
             ->keyBy('ip');
+        $queuedIps = VpnLookupQueue::query()
+            ->whereIn('ip', $rows->pluck('source')->all())
+            ->get()
+            ->keyBy('ip');
 
-        return $rows->map(function ($row) use ($ipIntelligence) {
+        return $rows->map(function ($row) use ($ipIntelligence, $queuedIps) {
                 $record = $ipIntelligence->get($row->source);
+                $queued = $queuedIps->get($row->source);
 
                 return [
                 'ip' => $row->source,
@@ -386,6 +401,13 @@ class IntelReportRefresher
                     'provider' => $record->provider,
                     'checked_at' => $this->dateString($record->checked_at),
                     'suspicious' => $record->isSuspicious(),
+                ] : null,
+                'queue' => $queued ? [
+                    'status' => $queued->status,
+                    'attempts' => (int) $queued->attempts,
+                    'available_at' => $this->dateString($queued->available_at),
+                    'looked_up_at' => $this->dateString($queued->looked_up_at),
+                    'last_error' => $queued->last_error,
                 ] : null,
             ];
             })
@@ -442,6 +464,7 @@ class IntelReportRefresher
 
         $this->addCorporationHistoryEvidence($user, $characterIds, $hostileEntityIds, $evidence);
         $this->addEmploymentOverlapEvidence($user, $characterIds, $evidence);
+        $this->addLowAssetValueEvidence($user, $characterIds, $evidence);
         $this->addFootprintEvidence($user, $characters, $characterIds, $hostileEntityIds, $evidence);
         $this->addWalletAccountEvidence($user, $characterIds, $evidence);
 
@@ -951,6 +974,110 @@ class IntelReportRefresher
         $this->addLowLoyaltyPointEvidence($user, $characterIds, $evidence);
 
         $this->addAssetLocationRiskEvidence($user, $characterIds, $hostileEntityIds, $evidence);
+    }
+
+    private function addLowAssetValueEvidence(User $user, $characterIds, $evidence): void
+    {
+        $threshold = 500000000;
+
+        if ($characterIds->isEmpty() || !Schema::hasTable('character_assets') || !Schema::hasColumn('character_assets', 'type_id')) {
+            return;
+        }
+
+        $hasMarketPrices = Schema::hasTable('market_prices');
+        $hasSdeTypes = Schema::hasTable('invTypes');
+        $quantityColumn = Schema::hasColumn('character_assets', 'quantity') ? 'quantity' : null;
+
+        $query = DB::table('character_assets')
+            ->whereIn('character_assets.character_id', $characterIds->all())
+            ->select('character_assets.type_id');
+
+        if ($quantityColumn) {
+            $query->selectRaw('sum(greatest(character_assets.quantity, 1)) as quantity');
+        } else {
+            $query->selectRaw('count(*) as quantity');
+        }
+
+        $marketPriceColumns = $hasMarketPrices
+            ? collect(['average_price', 'adjusted_price', 'average', 'sell_price', 'buy_price'])
+                ->filter(fn ($column) => Schema::hasColumn('market_prices', $column))
+                ->values()
+            : collect();
+
+        if ($hasMarketPrices) {
+            $query->leftJoin('market_prices', 'market_prices.type_id', '=', 'character_assets.type_id')
+                ->addSelect($marketPriceColumns
+                    ->map(fn ($column) => DB::raw(sprintf('max(market_prices.%s) as %s', $column, $column)))
+                    ->all());
+        }
+
+        if ($hasSdeTypes) {
+            $query->leftJoin('invTypes', 'invTypes.typeID', '=', 'character_assets.type_id')
+                ->addSelect([
+                    DB::raw('max(invTypes.typeName) as type_name'),
+                    DB::raw('max(invTypes.basePrice) as base_price'),
+                ]);
+        }
+
+        $rows = $query
+            ->groupBy('character_assets.type_id')
+            ->get()
+            ->map(function ($row) use ($marketPriceColumns) {
+                $priceCandidates = $marketPriceColumns
+                    ->mapWithKeys(fn ($column) => [$column => (float) ($row->{$column} ?? 0)])
+                    ->merge(['base_price' => (float) ($row->base_price ?? 0)])
+                    ->all();
+                $priceSource = collect($priceCandidates)->filter(fn ($price) => $price > 0)->keys()->first();
+                $unitPrice = $priceSource ? $priceCandidates[$priceSource] : 0.0;
+                $quantity = max(1, (int) $row->quantity);
+
+                return [
+                    'type_id' => (int) $row->type_id,
+                    'type_name' => $row->type_name ?? null,
+                    'quantity' => $quantity,
+                    'unit_price' => $unitPrice,
+                    'price_source' => $priceSource,
+                    'estimated_value' => $unitPrice * $quantity,
+                ];
+            });
+
+        if ($rows->isEmpty()) {
+            return;
+        }
+
+        $pricedRows = $rows->filter(fn ($row) => (float) $row['unit_price'] > 0);
+
+        if ($pricedRows->isEmpty()) {
+            return;
+        }
+
+        $estimatedValue = (float) $pricedRows->sum('estimated_value');
+
+        if ($estimatedValue >= $threshold) {
+            return;
+        }
+
+        $evidence->push([
+            'category' => 'low_asset_value',
+            'score' => $estimatedValue < 100000000 ? 18 : 14,
+            'title' => 'Low total asset value',
+            'details' => sprintf('%s has about %s ISK in priced visible assets across monitored characters, below the %s ISK threshold.',
+                $user->name,
+                number_format($estimatedValue, 0),
+                number_format($threshold)
+            ),
+            'meta' => [
+                'estimated_asset_value' => $estimatedValue,
+                'threshold' => $threshold,
+                'priced_type_count' => $pricedRows->count(),
+                'unpriced_type_count' => $rows->count() - $pricedRows->count(),
+                'top_assets' => $pricedRows
+                    ->sortByDesc('estimated_value')
+                    ->take(10)
+                    ->values()
+                    ->all(),
+            ],
+        ]);
     }
 
     private function addLowLoyaltyPointEvidence(User $user, $characterIds, $evidence): void

@@ -13,6 +13,7 @@ use Raikia\SeatSpyHunter\Jobs\RefreshEveWhoMemberEsiJob;
 use Raikia\SeatSpyHunter\Models\IntelEntity;
 use Raikia\SeatSpyHunter\Models\IpIntelligence;
 use Raikia\SeatSpyHunter\Models\VpnLookupQueue;
+use Raikia\SeatSpyHunter\Services\IpIntelligenceService;
 use Seat\Web\Http\Controllers\Controller;
 
 class IntelCacheController extends Controller
@@ -83,6 +84,13 @@ class IntelCacheController extends Controller
         ProcessVpnLookupQueueJob::dispatch();
 
         return redirect()->route('seat-spy-hunter.caches')->with('success', 'VPN lookup queue job dispatched. The worker will process pending VPNAPI.io lookups in the background.');
+    }
+
+    public function queueLoginIps(IpIntelligenceService $ipIntelligence)
+    {
+        $queued = $ipIntelligence->queueKnownLoginIps(null);
+
+        return redirect()->route('seat-spy-hunter.caches')->with('success', sprintf('Queued %d uncached public login IP%s for VPNAPI.io lookup.', $queued, $queued === 1 ? '' : 's'));
     }
 
     public function destroyEveWhoMember(EveWhoMember $member)

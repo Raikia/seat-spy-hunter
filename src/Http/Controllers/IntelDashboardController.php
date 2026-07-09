@@ -29,9 +29,9 @@ class IntelDashboardController extends Controller
                 $query->where('rating', $rating);
             })
             ->when($reviewStatus === 'active', function ($query) {
-                $query->where('review_status', '<>', 'cleared');
+                $query->whereNotIn('review_status', ['cleared', 'permanently_cleared']);
             })
-            ->when(in_array($reviewStatus, ['new', 'reviewing', 'watchlisted', 'escalated', 'cleared'], true), function ($query) use ($reviewStatus) {
+            ->when(in_array($reviewStatus, ['new', 'reviewing', 'watchlisted', 'escalated', 'cleared', 'permanently_cleared'], true), function ($query) use ($reviewStatus) {
                 $query->where('review_status', $reviewStatus);
             })
             ->when($evidenceCategory && array_key_exists($evidenceCategory, $evidenceCategories), function ($query) use ($evidenceCategory) {
@@ -105,6 +105,7 @@ class IntelDashboardController extends Controller
             'low_loyalty_points' => 'Low Loyalty Points',
             'age_skill_mismatch' => 'Age vs SP',
             'low_assets' => 'Low Assets',
+            'low_asset_value' => 'Low Asset Value',
             'corporation_history_churn' => 'Corp Churn',
             'quiet_corporation_history' => 'Quiet Corp History',
             'recent_neutral_corporation_history' => 'Recent Neutral Corp',
@@ -137,7 +138,7 @@ class IntelDashboardController extends Controller
     public function updateReview(Request $request, CharacterIntelReport $report)
     {
         $data = $request->validate([
-            'review_status' => 'required|in:new,reviewing,cleared,watchlisted,escalated',
+            'review_status' => 'required|in:new,reviewing,cleared,permanently_cleared,watchlisted,escalated',
             'review_notes' => 'nullable|string|max:5000',
         ]);
 
@@ -149,6 +150,27 @@ class IntelDashboardController extends Controller
         ]);
 
         return redirect()->route('seat-spy-hunter.index')->with('success', 'Spy Hunter review updated.');
+    }
+
+    public function bulkUpdateReview(Request $request)
+    {
+        $data = $request->validate([
+            'report_ids' => 'required|array|min:1',
+            'report_ids.*' => 'integer|exists:seat_spy_hunter_character_reports,id',
+            'review_status' => 'required|in:new,reviewing,cleared,permanently_cleared,watchlisted,escalated',
+            'review_notes' => 'nullable|string|max:5000',
+        ]);
+
+        $updated = CharacterIntelReport::query()
+            ->whereIn('id', $data['report_ids'])
+            ->update([
+                'review_status' => $data['review_status'],
+                'review_notes' => $data['review_notes'] ?? null,
+                'reviewed_by' => optional($request->user())->id,
+                'reviewed_at' => now(),
+            ]);
+
+        return redirect()->back()->with('success', sprintf('Updated %d Spy Hunter review%s.', $updated, $updated === 1 ? '' : 's'));
     }
 
     public function storeSuppression(Request $request, CharacterIntelReport $report)

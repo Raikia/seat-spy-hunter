@@ -20,6 +20,11 @@ Route::group([
         'uses' => 'IntelDashboardController@refresh',
     ]);
 
+    Route::post('/reports/bulk-review', [
+        'as' => 'seat-spy-hunter.reports.bulk-review',
+        'uses' => 'IntelDashboardController@bulkUpdateReview',
+    ]);
+
     Route::post('/reports/{report}/review', [
         'as' => 'seat-spy-hunter.reports.review',
         'uses' => 'IntelDashboardController@updateReview',
@@ -51,6 +56,10 @@ Route::group([
         Route::post('/caches/vpn/process', [
             'as' => 'seat-spy-hunter.caches.vpn.process',
             'uses' => 'IntelCacheController@processVpnQueue',
+        ]);
+        Route::post('/caches/vpn/queue-login-ips', [
+            'as' => 'seat-spy-hunter.caches.vpn.queue-login-ips',
+            'uses' => 'IntelCacheController@queueLoginIps',
         ]);
         Route::delete('/caches/evewho/{member}', [
             'as' => 'seat-spy-hunter.caches.evewho.destroy',

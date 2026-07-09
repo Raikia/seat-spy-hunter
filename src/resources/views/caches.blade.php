@@ -47,6 +47,12 @@
         <div class="card-header">
             <h3 class="card-title"><i class="fas fa-shield-alt mr-1"></i> VPNAPI.io / Manual IP Cache</h3>
             <div class="card-tools">
+                <form method="POST" action="{{ route('seat-spy-hunter.caches.vpn.queue-login-ips') }}" class="d-inline">
+                    {{ csrf_field() }}
+                    <button type="submit" class="btn btn-sm btn-outline-secondary">
+                        <i class="fas fa-plus-circle"></i> Queue Login IPs
+                    </button>
+                </form>
                 <form method="POST" action="{{ route('seat-spy-hunter.caches.vpn.process') }}" class="d-inline">
                     {{ csrf_field() }}
                     <button type="submit" class="btn btn-sm btn-outline-primary">
@@ -57,7 +63,7 @@
         </div>
         <div class="card-body">
             <div class="alert alert-info">
-                This processes pending uncached public IP lookups through VPNAPI.io. Cached IP results are kept indefinitely, and rate limits pause processing until the next UTC day.
+                Queue Login IPs scans SeAT login history and adds uncached public IPs to the pending queue. Run VPN Queue dispatches the background worker that processes those pending lookups through VPNAPI.io. Cached IP results are kept indefinitely, and rate limits pause processing until the next UTC day.
             </div>
             <form method="GET" action="{{ route('seat-spy-hunter.caches') }}" class="form-row align-items-end mb-3">
                 <div class="form-group col-md-9">

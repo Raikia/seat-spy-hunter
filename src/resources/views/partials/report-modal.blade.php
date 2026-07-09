@@ -22,6 +22,7 @@
         'low_loyalty_points' => 'Low LP',
         'age_skill_mismatch' => 'Age vs SP',
         'low_assets' => 'Low Assets',
+        'low_asset_value' => 'Low Asset Value',
         'hostile_asset_location' => 'Hostile Asset Location',
         'hostile_employment_overlap' => 'Hostile Employment Overlap',
         'hostile_mail' => 'Hostile Mail',
@@ -63,6 +64,7 @@
         'low_loyalty_points' => 'warning',
         'age_skill_mismatch' => 'info',
         'low_assets' => 'info',
+        'low_asset_value' => 'warning',
         'hostile_asset_location' => 'warning',
         'hostile_employment_overlap' => 'danger',
         'hostile_mail' => 'danger',
@@ -83,7 +85,8 @@
         'new_character' => 'info',
         'suppressed_signals' => 'secondary',
     ];
-    $reviewBadge = ['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'][$report->review_status] ?? 'secondary';
+    $reviewLabels = ['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'];
+    $reviewBadge = ['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'permanently_cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'][$report->review_status] ?? 'secondary';
     $characterLink = function ($characterId, $label) {
         if (!$characterId) {
             return e($label ?: 'Unknown');
@@ -115,7 +118,7 @@
                         @endif
 	                    </small>
                         <div class="mt-1">
-                            <span class="badge badge-{{ $reviewBadge }}">{{ ucfirst($report->review_status ?: 'new') }}</span>
+                            <span class="badge badge-{{ $reviewBadge }}">{{ $reviewLabels[$report->review_status] ?? ucfirst($report->review_status ?: 'new') }}</span>
                             @if($report->reviewed_at)
                                 <span class="small text-muted">Reviewed {{ $report->reviewed_at->toDateTimeString() }}</span>
                             @endif
@@ -135,10 +138,11 @@
 	                            <div class="form-group col-md-3">
 	                                <label>Status</label>
 	                                <select name="review_status" class="form-control">
-	                                    @foreach(['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'] as $value => $label)
+	                                    @foreach(['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'] as $value => $label)
 	                                        <option value="{{ $value }}" {{ $report->review_status === $value ? 'selected' : '' }}>{{ $label }}</option>
 	                                    @endforeach
 	                                </select>
+                                    <small class="form-text text-muted">Permanently cleared accounts stay hidden from the active queue even when new evidence appears.</small>
 	                            </div>
 	                            <div class="form-group col-md-7">
 	                                <label>Notes</label>
@@ -368,6 +372,7 @@
 	                        @forelse($accountLoginIps as $loginIp)
                                 @php
                                     $ipIntel = data_get($loginIp, 'intelligence');
+                                    $ipQueue = data_get($loginIp, 'queue');
                                     $ipRiskScore = (int) data_get($ipIntel, 'risk_score', 0);
                                 @endphp
 	                            <tr>
@@ -401,7 +406,21 @@
                                                 {{ $ipIntel['provider'] ?: 'manual' }}{{ !empty($ipIntel['checked_at']) ? ' / checked ' . $ipIntel['checked_at'] : '' }}
                                             </span>
                                         @elseif(!empty($loginIp['public']))
-                                            <span class="badge badge-light">Lookup pending</span>
+                                            @if(data_get($ipQueue, 'status') === 'pending')
+                                                <span class="badge badge-warning">VPN lookup queued</span>
+                                                @if(data_get($ipQueue, 'available_at'))
+                                                    <span class="text-muted small d-block">Available {{ data_get($ipQueue, 'available_at') }}</span>
+                                                @endif
+                                            @elseif(data_get($ipQueue, 'status') === 'complete')
+                                                <span class="badge badge-success">Lookup complete</span>
+                                            @elseif($ipQueue)
+                                                <span class="badge badge-danger">Lookup retry pending</span>
+                                                @if(data_get($ipQueue, 'last_error'))
+                                                    <span class="text-muted small d-block">{{ data_get($ipQueue, 'last_error') }}</span>
+                                                @endif
+                                            @else
+                                                <span class="badge badge-light">Not queued yet</span>
+                                            @endif
                                         @endif
 	                                </td>
 	                                <td>{{ $loginIp['login_count'] }}</td>
@@ -477,6 +496,7 @@
                             $structuredKeys = [
                                 'characters', 'contacts', 'new_items', 'suppressed', 'corporations', 'matches',
                                 'shared_users', 'latest_received', 'latest_sent', 'latest_journal', 'latest_transactions',
+                                'top_assets',
                             ];
                             $summaryMeta = $meta
                                 ->reject(fn($value, $key) => in_array($key, $structuredKeys, true))
@@ -570,6 +590,43 @@
                                             <td>{{ (int) data_get($ipRecord, 'risk_score', 0) }}</td>
                                             <td>{{ data_get($ipRecord, 'provider') ?: 'manual' }}</td>
                                             <td>{{ data_get($ipRecord, 'checked_at') ?: 'Unknown' }}</td>
+                                        </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        @endif
+                        @if($evidence->category === 'low_asset_value' && !empty(data_get($evidence->meta, 'top_assets')))
+                            <div class="mb-2">
+                                <span class="badge badge-warning">Estimated {{ number_format((float) data_get($evidence->meta, 'estimated_asset_value', 0), 0) }} ISK</span>
+                                <span class="badge badge-light">Threshold {{ number_format((float) data_get($evidence->meta, 'threshold', 0), 0) }} ISK</span>
+                                <span class="badge badge-light">{{ number_format((int) data_get($evidence->meta, 'priced_type_count', 0)) }} priced types</span>
+                                @if((int) data_get($evidence->meta, 'unpriced_type_count', 0) > 0)
+                                    <span class="badge badge-secondary">{{ number_format((int) data_get($evidence->meta, 'unpriced_type_count', 0)) }} unpriced types</span>
+                                @endif
+                            </div>
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead>
+                                    <tr>
+                                        <th>Asset Type</th>
+                                        <th>Quantity</th>
+                                        <th>Unit Price</th>
+                                        <th>Estimated Value</th>
+                                        <th>Price Source</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    @foreach(data_get($evidence->meta, 'top_assets', []) as $asset)
+                                        <tr>
+                                            <td>
+                                                {{ data_get($asset, 'type_name') ?: data_get($asset, 'type_id') }}
+                                                <div class="small text-muted">{{ data_get($asset, 'type_id') }}</div>
+                                            </td>
+                                            <td>{{ number_format((int) data_get($asset, 'quantity', 0)) }}</td>
+                                            <td>{{ number_format((float) data_get($asset, 'unit_price', 0), 2) }} ISK</td>
+                                            <td>{{ number_format((float) data_get($asset, 'estimated_value', 0), 2) }} ISK</td>
+                                            <td>{{ str_replace('_', ' ', data_get($asset, 'price_source') ?: 'Unknown') }}</td>
                                         </tr>
                                     @endforeach
                                     </tbody>
