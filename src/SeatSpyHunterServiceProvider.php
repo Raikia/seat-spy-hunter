@@ -22,6 +22,8 @@ class SeatSpyHunterServiceProvider extends AbstractSeatPlugin
 
     public function register()
     {
+        require_once __DIR__ . '/database/seeders/ScheduleSeeder.php';
+
         $this->mergeConfigFrom(
             __DIR__ . '/Config/seat-spy-hunter.sidebar.php', 'package.sidebar'
         );
