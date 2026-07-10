@@ -34,110 +34,117 @@ class IntelReportRefresher
 
     public function refresh(): int
     {
-        return DB::transaction(function () {
-            $hostileEntityIds = $this->hostileContacts->hostileEntityIds();
-            $characters = $this->monitoredCharacters();
-            $charactersByUser = $characters
-                ->filter(fn ($character) => optional($character->user)->id)
-                ->groupBy(fn ($character) => optional($character->user)->id);
-            $previousReviews = CharacterIntelReport::query()
-                ->with('evidence')
-                ->get(['id', 'account_user_id', 'user_id', 'review_status', 'review_notes', 'reviewed_by', 'reviewed_at'])
-                ->keyBy(fn ($report) => (int) ($report->account_user_id ?: $report->user_id));
-            $count = 0;
+        $hostileEntityIds = $this->hostileContacts->hostileEntityIds();
+        $monitoredCharacterIds = $this->monitoredCharacterIds();
+        $monitoredUserIds = $this->userIdsForCharacters($monitoredCharacterIds);
+        $count = 0;
+        $processedUserIds = collect();
 
-            $this->eveWho->queueConfiguredHostiles();
-            CharacterIntelReport::query()->delete();
+        $this->eveWho->queueConfiguredHostiles();
+
+        foreach ($monitoredUserIds->chunk(100) as $userIdChunk) {
+            $charactersByUser = $this->accountCharactersForUsers($userIdChunk)
+                ->filter(fn ($character) => (int) ($character->spy_hunter_account_user_id ?? optional($character->user)->id))
+                ->groupBy(fn ($character) => (int) ($character->spy_hunter_account_user_id ?? optional($character->user)->id));
+            $users = User::query()
+                ->whereIn('id', $charactersByUser->keys()->all())
+                ->get()
+                ->keyBy('id');
 
             foreach ($charactersByUser as $userId => $userCharacters) {
-                $user = User::find((int) $userId);
+                $user = $users->get((int) $userId);
 
-                if (!$user) {
-                    continue;
-                }
+                    if (!$user) {
+                        continue;
+                    }
 
-                $analyses = $userCharacters->map(function ($character) use ($hostileEntityIds) {
-                    return [
-                        'character' => $character,
-                        'analysis' => $this->analyzer->analyze($character, $hostileEntityIds),
+                    $analyses = $userCharacters->map(function ($character) use ($hostileEntityIds) {
+                        return [
+                            'character' => $character,
+                            'analysis' => $this->analyzer->analyze($character, $hostileEntityIds),
+                        ];
+                    })->reject(fn ($row) => $row['analysis']['ignored'])->values();
+
+                    if ($analyses->isEmpty()) {
+                        continue;
+                    }
+
+                    $scoredCharacters = $analyses->pluck('character')->values();
+                    $characterEvidence = $this->accountScopedCharacterEvidence($analyses, $monitoredCharacterIds);
+                    $accountEvidence = $this->accountEvidence($user, $scoredCharacters, $hostileEntityIds);
+                    $evidence = $characterEvidence->merge($accountEvidence)->values();
+                    $suppressedCategories = $this->suppressedCategories((int) $user->id);
+                    $suppressedEvidence = $evidence->filter(fn ($row) => $suppressedCategories->has($row['category']))->values();
+                    $evidence = $evidence->reject(fn ($row) => $suppressedCategories->has($row['category']))->values();
+                    $metrics = $this->accountMetrics($analyses);
+                    $mitigation = $accountEvidence->sum(fn ($row) => (int) data_get($row, 'meta.mitigation_score', 0));
+                    $score = min(100, max(0, (int) $evidence->sum('score') - $mitigation));
+                    $primaryCharacter = $this->primaryCharacter($user, $scoredCharacters);
+                    $affiliation = optional($primaryCharacter)->affiliation;
+                    $previousReview = $this->previousReportForAccount((int) $user->id);
+                    $newEvidenceSinceReview = $this->newEvidenceSinceReviewEvidence($previousReview, $evidence);
+                    $reviewWorkflow = $this->reviewWorkflowAttributes($previousReview, (bool) $newEvidenceSinceReview);
+
+                    if ($newEvidenceSinceReview) {
+                        $evidence->push($newEvidenceSinceReview);
+                    }
+
+                    $riskSignalCount = $evidence
+                        ->reject(fn ($row) => in_array($row['category'], ['account_connectors', 'multi_character_account', 'new_evidence_since_review']))
+                        ->where('score', '>', 0)
+                        ->count();
+
+                    $reportAttributes = [
+                        'character_id' => $primaryCharacter ? (int) $primaryCharacter->character_id : null,
+                        'character_name' => $user->name,
+                        'corporation_id' => $primaryCharacter ? $this->corporationId($primaryCharacter) : null,
+                        'corporation_name' => $primaryCharacter ? $this->corporationName($primaryCharacter, $affiliation) : null,
+                        'alliance_id' => $this->allianceId($affiliation),
+                        'alliance_name' => $this->allianceName($affiliation),
+                        'user_id' => (int) $user->id,
+                        'score' => $score,
+                        'rating' => RiskRating::fromScore($score),
+                        'evidence_count' => $riskSignalCount,
+                        'hostile_contact_count' => $metrics['hostile_contact_count'],
+                        'hostile_mail_count' => $metrics['hostile_mail_count'],
+                        'hostile_wallet_count' => $metrics['hostile_wallet_count'],
+                        'shared_ip_user_count' => $metrics['shared_ip_user_count'],
+                        'vpn_ip_count' => $metrics['vpn_ip_count'],
+                        'skillpoints' => $scoredCharacters->sum(fn ($character) => (int) optional($character->skillpoints)->total_sp),
+                        'birthday' => $this->oldestBirthday($scoredCharacters),
+                        'last_analyzed_at' => now(),
+                        'review_status' => $reviewWorkflow['review_status'],
+                        'review_notes' => $reviewWorkflow['review_notes'],
+                        'reviewed_by' => $reviewWorkflow['reviewed_by'],
+                        'reviewed_at' => $reviewWorkflow['reviewed_at'],
                     ];
-                })->reject(fn ($row) => $row['analysis']['ignored'])->values();
 
-                if ($analyses->isEmpty()) {
-                    continue;
-                }
+                    if (Schema::hasColumn('seat_spy_hunter_character_reports', 'account_user_id')) {
+                        $reportAttributes['account_user_id'] = (int) $user->id;
+                    }
 
-                $scoredCharacters = $analyses->pluck('character')->values();
-                $characterEvidence = $this->accountScopedCharacterEvidence($analyses);
-                $accountEvidence = $this->accountEvidence($user, $scoredCharacters, $hostileEntityIds);
-                $evidence = $characterEvidence->merge($accountEvidence)->values();
-                $suppressedCategories = $this->suppressedCategories((int) $user->id);
-                $suppressedEvidence = $evidence->filter(fn ($row) => $suppressedCategories->has($row['category']))->values();
-                $evidence = $evidence->reject(fn ($row) => $suppressedCategories->has($row['category']))->values();
-                $metrics = $this->accountMetrics($analyses);
-                $mitigation = $accountEvidence->sum(fn ($row) => (int) data_get($row, 'meta.mitigation_score', 0));
-                $score = min(100, max(0, (int) $evidence->sum('score') - $mitigation));
-                $primaryCharacter = $this->primaryCharacter($user, $scoredCharacters);
-                $affiliation = optional($primaryCharacter)->affiliation;
-                $previousReview = $previousReviews->get((int) $user->id);
-                $newEvidenceSinceReview = $this->newEvidenceSinceReviewEvidence($previousReview, $evidence);
-                $reviewWorkflow = $this->reviewWorkflowAttributes($previousReview, (bool) $newEvidenceSinceReview);
+                    DB::transaction(function () use ($user, $reportAttributes, $scoredCharacters, $monitoredCharacterIds, $evidence, $suppressedEvidence, $suppressedCategories) {
+                        $this->deleteReportsForAccount((int) $user->id);
+                        $report = CharacterIntelReport::create($reportAttributes);
 
-                if ($newEvidenceSinceReview) {
-                    $evidence->push($newEvidenceSinceReview);
-                }
+                        $reportEvidence = collect([$this->accountCharactersEvidence($user, $scoredCharacters, $monitoredCharacterIds)])
+                            ->merge($evidence);
 
-                $riskSignalCount = $evidence
-                    ->reject(fn ($row) => in_array($row['category'], ['account_connectors', 'multi_character_account', 'new_evidence_since_review']))
-                    ->where('score', '>', 0)
-                    ->count();
+                        if ($suppressedEvidence->isNotEmpty()) {
+                            $reportEvidence->push($this->suppressedEvidenceContext($suppressedEvidence, $suppressedCategories));
+                        }
 
-                $reportAttributes = [
-                    'character_id' => $primaryCharacter ? (int) $primaryCharacter->character_id : null,
-                    'character_name' => $user->name,
-                    'corporation_id' => $primaryCharacter ? $this->corporationId($primaryCharacter) : null,
-                    'corporation_name' => $primaryCharacter ? $this->corporationName($primaryCharacter, $affiliation) : null,
-                    'alliance_id' => $this->allianceId($affiliation),
-                    'alliance_name' => $this->allianceName($affiliation),
-                    'user_id' => (int) $user->id,
-                    'score' => $score,
-                    'rating' => RiskRating::fromScore($score),
-                    'evidence_count' => $riskSignalCount,
-                    'hostile_contact_count' => $metrics['hostile_contact_count'],
-                    'hostile_mail_count' => $metrics['hostile_mail_count'],
-                    'hostile_wallet_count' => $metrics['hostile_wallet_count'],
-                    'shared_ip_user_count' => $metrics['shared_ip_user_count'],
-                    'vpn_ip_count' => $metrics['vpn_ip_count'],
-                    'skillpoints' => $scoredCharacters->sum(fn ($character) => (int) optional($character->skillpoints)->total_sp),
-                    'birthday' => $this->oldestBirthday($scoredCharacters),
-                    'last_analyzed_at' => now(),
-                    'review_status' => $reviewWorkflow['review_status'],
-                    'review_notes' => $reviewWorkflow['review_notes'],
-                    'reviewed_by' => $reviewWorkflow['reviewed_by'],
-                    'reviewed_at' => $reviewWorkflow['reviewed_at'],
-                ];
+                        $this->insertReportEvidence($report, $reportEvidence);
+                    });
 
-                if (Schema::hasColumn('seat_spy_hunter_character_reports', 'account_user_id')) {
-                    $reportAttributes['account_user_id'] = (int) $user->id;
-                }
-
-                $report = CharacterIntelReport::create($reportAttributes);
-
-                $report->evidence()->create($this->accountCharactersEvidence($user, $scoredCharacters));
-
-                foreach ($evidence as $row) {
-                    $report->evidence()->create($row);
-                }
-
-                if ($suppressedEvidence->isNotEmpty()) {
-                    $report->evidence()->create($this->suppressedEvidenceContext($suppressedEvidence, $suppressedCategories));
-                }
-
-                $count++;
+                    $processedUserIds->push((int) $user->id);
+                    $count++;
             }
+        }
 
-            return $count;
-        });
+        $this->deleteReportsOutsideAccounts($processedUserIds);
+
+        return $count;
     }
 
     private function accountMetrics($analyses): array
@@ -149,6 +156,78 @@ class IntelReportRefresher
             'shared_ip_user_count' => $analyses->pluck('analysis.metrics.shared_ip_user_count')->max() ?: 0,
             'vpn_ip_count' => $analyses->pluck('analysis.metrics.vpn_ip_count')->max() ?: 0,
         ];
+    }
+
+    private function insertReportEvidence(CharacterIntelReport $report, $evidence): void
+    {
+        $now = now();
+
+        collect($evidence)
+            ->filter()
+            ->map(fn ($row) => [
+                'report_id' => $report->id,
+                'category' => $row['category'],
+                'score' => (int) ($row['score'] ?? 0),
+                'title' => $row['title'],
+                'details' => $row['details'] ?? null,
+                'meta' => array_key_exists('meta', $row) ? json_encode($row['meta']) : null,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ])
+            ->chunk(100)
+            ->each(fn ($chunk) => DB::table('seat_spy_hunter_character_report_evidence')->insert($chunk->all()));
+    }
+
+    private function previousReportForAccount(int $userId): ?CharacterIntelReport
+    {
+        return $this->reportQueryForAccount($userId)
+            ->with('evidence')
+            ->first();
+    }
+
+    private function deleteReportsForAccount(int $userId): void
+    {
+        $this->reportQueryForAccount($userId)->delete();
+    }
+
+    private function deleteReportsOutsideAccounts($userIds): void
+    {
+        $userIds = collect($userIds)->map(fn ($id) => (int) $id)->filter()->unique()->values();
+        $query = CharacterIntelReport::query();
+
+        if ($userIds->isEmpty()) {
+            $query->delete();
+
+            return;
+        }
+
+        if (Schema::hasColumn('seat_spy_hunter_character_reports', 'account_user_id')) {
+            $query->where(function ($inner) use ($userIds) {
+                $inner->whereNotIn('account_user_id', $userIds->all())
+                    ->orWhereNull('account_user_id');
+            });
+        } else {
+            $query->whereNotIn('user_id', $userIds->all());
+        }
+
+        $query->delete();
+    }
+
+    private function reportQueryForAccount(int $userId)
+    {
+        $query = CharacterIntelReport::query();
+
+        if (Schema::hasColumn('seat_spy_hunter_character_reports', 'account_user_id')) {
+            return $query->where(function ($inner) use ($userId) {
+                $inner->where('account_user_id', $userId)
+                    ->orWhere(function ($legacy) use ($userId) {
+                        $legacy->whereNull('account_user_id')
+                            ->where('user_id', $userId);
+                    });
+            });
+        }
+
+        return $query->where('user_id', $userId);
     }
 
     private function reviewWorkflowAttributes(?CharacterIntelReport $previousReview, bool $hasNewEvidence): array
@@ -287,9 +366,35 @@ class IntelReportRefresher
         return $meta;
     }
 
-    private function accountScopedCharacterEvidence($analyses)
+    private function accountScopedCharacterEvidence($analyses, $monitoredCharacterIds)
     {
-        $evidence = $analyses->pluck('analysis.evidence')->flatten(1)->values();
+        $monitoredCharacterLookup = collect($monitoredCharacterIds)->map(fn ($id) => (int) $id)->flip();
+        $evidence = $analyses
+            ->flatMap(function ($row) use ($monitoredCharacterLookup) {
+                $character = $row['character'];
+                $isMonitoredCharacter = $monitoredCharacterLookup->has((int) $character->character_id);
+
+                return collect($row['analysis']['evidence'] ?? [])->map(function ($evidenceRow) use ($character, $isMonitoredCharacter) {
+                    $evidenceRow['meta'] = $evidenceRow['meta'] ?? [];
+                    $evidenceRow['meta']['source_character_id'] = (int) $character->character_id;
+                    $evidenceRow['meta']['source_character_name'] = $character->name;
+                    $evidenceRow['meta']['source_character_monitored'] = $isMonitoredCharacter;
+
+                    if (!$isMonitoredCharacter && $this->isAltWeightedHostileCategory($evidenceRow['category'] ?? null) && (int) ($evidenceRow['score'] ?? 0) > 0) {
+                        $boost = min(10, max(3, (int) ceil(((int) $evidenceRow['score']) * 0.25)));
+                        $evidenceRow['score'] = min(100, (int) $evidenceRow['score'] + $boost);
+                        $evidenceRow['meta']['alt_only_signal'] = true;
+                        $evidenceRow['meta']['alt_score_bonus'] = $boost;
+                        $evidenceRow['details'] = sprintf('%s Found on linked alt %s, which is not itself in a monitored group.',
+                            $evidenceRow['details'] ?? '',
+                            $character->name
+                        );
+                    }
+
+                    return $evidenceRow;
+                });
+            })
+            ->values();
         $accountSignalCategories = ['shared_ip', 'vpn_ip'];
         $replacedByAccountCategories = ['low_skills', 'few_trained_skills'];
         $accountSignals = collect();
@@ -311,6 +416,16 @@ class IntelReportRefresher
             ->values();
     }
 
+    private function isAltWeightedHostileCategory(?string $category): bool
+    {
+        return in_array($category, [
+            'hostile_contacts',
+            'hostile_mail',
+            'hostile_wallet_direct',
+            'hostile_market_transaction',
+        ], true);
+    }
+
     private function primaryCharacter(User $user, $characters): ?CharacterInfo
     {
         return $characters->firstWhere('character_id', $user->main_character_id)
@@ -324,28 +439,36 @@ class IntelReportRefresher
         return $birthday ?: null;
     }
 
-    private function accountCharactersEvidence(User $user, $characters): array
+    private function accountCharactersEvidence(User $user, $characters, $monitoredCharacterIds): array
     {
+        $monitoredCharacterLookup = collect($monitoredCharacterIds)->map(fn ($id) => (int) $id)->flip();
+        $monitoredCount = $characters->filter(fn ($character) => $monitoredCharacterLookup->has((int) $character->character_id))->count();
+
         return [
             'category' => 'account_characters',
             'score' => 0,
-            'title' => 'Monitored characters on this SeAT account',
-            'details' => sprintf('%s has %d monitored character%s included in this account-level score.',
+            'title' => 'Linked characters on this SeAT account',
+            'details' => sprintf('%s has %d linked character%s included in this account-level score because %d character%s is in a monitored group.',
                 $user->name,
                 $characters->count(),
-                $characters->count() === 1 ? '' : 's'
+                $characters->count() === 1 ? '' : 's',
+                $monitoredCount,
+                $monitoredCount === 1 ? '' : 's'
             ),
             'meta' => [
                 'user_id' => (int) $user->id,
                 'user_name' => $user->name,
+                'character_count' => $characters->count(),
+                'monitored_character_count' => $monitoredCount,
                 'login_ips' => $this->accountLoginIps($user),
-                'characters' => $characters->map(function ($character) use ($user) {
+                'characters' => $characters->map(function ($character) use ($user, $monitoredCharacterLookup) {
                     $affiliation = $character->affiliation;
 
                     return [
                         'character_id' => (int) $character->character_id,
                         'name' => $character->name,
                         'main' => (int) $user->main_character_id === (int) $character->character_id,
+                        'monitored' => $monitoredCharacterLookup->has((int) $character->character_id),
                         'corporation_id' => $this->corporationId($character),
                         'corporation_name' => $this->corporationName($character, $affiliation),
                         'alliance_id' => $this->allianceId($affiliation),
@@ -426,14 +549,15 @@ class IntelReportRefresher
         }
 
         $this->addEsiCoverageHealthEvidence($user, $characters, $evidence);
+        $this->addRiskConfidenceEvidence($user, $characters, $evidence);
 
         if ($characters->count() > 1) {
             $mitigation = min(20, ($characters->count() - 1) * 8);
             $evidence->push([
                 'category' => 'multi_character_account',
                 'score' => 0,
-                'title' => 'Multiple monitored characters linked',
-                'details' => sprintf('%s has %d monitored characters linked to the same SeAT account, reducing account-level concern by %d points.',
+                'title' => 'Multiple account characters linked',
+                'details' => sprintf('%s has %d characters linked to the same SeAT account, reducing account-level concern by %d points.',
                     $user->name,
                     $characters->count(),
                     $mitigation
@@ -451,7 +575,7 @@ class IntelReportRefresher
                 'category' => 'low_account_skillpoints',
                 'score' => 15,
                 'title' => 'Low account skillpoint footprint',
-                'details' => sprintf('%s has %s total monitored skillpoints, below the 10,000,000 account threshold.',
+                'details' => sprintf('%s has %s total linked-character skillpoints, below the 10,000,000 account threshold.',
                     $user->name,
                     number_format($totalSkillpoints)
                 ),
@@ -464,6 +588,8 @@ class IntelReportRefresher
 
         $this->addCorporationHistoryEvidence($user, $characterIds, $hostileEntityIds, $evidence);
         $this->addEmploymentOverlapEvidence($user, $characterIds, $evidence);
+        $this->addHostileKillmailEvidence($user, $characterIds, $hostileEntityIds, $evidence);
+        $this->addHostileContractEvidence($user, $characterIds, $hostileEntityIds, $evidence);
         $this->addLowAssetValueEvidence($user, $characterIds, $evidence);
         $this->addFootprintEvidence($user, $characters, $characterIds, $hostileEntityIds, $evidence);
         $this->addWalletAccountEvidence($user, $characterIds, $evidence);
@@ -546,7 +672,7 @@ class IntelReportRefresher
             'category' => 'esi_coverage_health',
             'score' => 0,
             'title' => 'ESI coverage health',
-            'details' => sprintf('%s has %d of %d monitored character%s with complete current ESI coverage for Spy Hunter review data.',
+            'details' => sprintf('%s has %d of %d linked character%s with complete current ESI coverage for Spy Hunter review data.',
                 $user->name,
                 $healthyRows->count(),
                 $rows->count(),
@@ -578,6 +704,86 @@ class IntelReportRefresher
             'Fittings' => ['esi-fittings.read_fittings.v1'],
             'Killmails' => ['esi-killmails.read_killmails.v1'],
         ];
+    }
+
+    private function addRiskConfidenceEvidence(User $user, $characters, $evidence): void
+    {
+        $characterIds = $characters->pluck('character_id')->map(fn ($id) => (int) $id)->filter()->values();
+        if ($characterIds->isEmpty()) {
+            return;
+        }
+
+        $scopeGroups = $this->esiCoverageScopeGroups();
+        $requiredScopes = collect($scopeGroups)->flatten()->unique()->values();
+        $tokens = RefreshToken::withTrashed()
+            ->whereIn('character_id', $characterIds->all())
+            ->get()
+            ->keyBy('character_id');
+        $covered = 0;
+        $missingGroups = collect();
+        $deletedOrMissing = 0;
+
+        foreach ($characters as $character) {
+            $token = $tokens->get((int) $character->character_id);
+            $scopes = collect($token ? ($token->scopes ?: []) : [])->map(fn ($scope) => (string) $scope)->values();
+            $missing = collect($scopeGroups)
+                ->filter(fn ($groupScopes) => collect($groupScopes)->diff($scopes)->isNotEmpty())
+                ->keys();
+
+            if (!$token || $token->deleted_at || blank($token->refresh_token)) {
+                $deletedOrMissing++;
+            }
+
+            if ($missing->isEmpty() && $token && !$token->deleted_at && filled($token->refresh_token)) {
+                $covered++;
+            }
+
+            $missingGroups = $missingGroups->merge($missing);
+        }
+
+        $coveragePercent = $characters->count() > 0 ? (int) round(($covered / $characters->count()) * 100) : 0;
+        $counts = [
+            'contacts' => $this->countCharacterRows('character_contacts', $characterIds),
+            'mail' => $this->countCharacterRows('mail_headers', $characterIds),
+            'wallet_journal' => $this->countCharacterRows('character_wallet_journals', $characterIds),
+            'wallet_transactions' => $this->countCharacterRows('character_wallet_transactions', $characterIds),
+            'contracts' => $this->countCharacterRows('character_contracts', $characterIds),
+            'killmails' => $this->countCharacterRows('killmail_attackers', $characterIds) + $this->countCharacterRows('killmail_victims', $characterIds),
+        ];
+        $visibleRows = array_sum($counts);
+
+        if ($coveragePercent >= 75 && $visibleRows >= 25) {
+            $level = 'high';
+            $badge = 'success';
+            $summary = 'Good scope coverage and enough visible activity to trust a quiet report more.';
+        } elseif ($coveragePercent >= 50 || $visibleRows >= 10) {
+            $level = 'medium';
+            $badge = 'warning';
+            $summary = 'Some useful data is available, but missing scopes or low activity mean the score may understate risk.';
+        } else {
+            $level = 'low';
+            $badge = 'danger';
+            $summary = 'Limited ESI coverage or very thin data makes the score lower-confidence.';
+        }
+
+        $evidence->push([
+            'category' => 'risk_confidence',
+            'score' => 0,
+            'title' => 'Risk score confidence',
+            'details' => sprintf('%s has %s Spy Hunter confidence. %s', $user->name, $level, $summary),
+            'meta' => [
+                'level' => $level,
+                'badge' => $badge,
+                'coverage_percent' => $coveragePercent,
+                'covered_character_count' => $covered,
+                'character_count' => $characters->count(),
+                'deleted_or_missing_token_count' => $deletedOrMissing,
+                'visible_data_rows' => $visibleRows,
+                'counts' => $counts,
+                'missing_scope_groups' => $missingGroups->countBy()->sortDesc()->all(),
+                'interpretation' => $summary,
+            ],
+        ]);
     }
 
     private function connectorEvidence(User $user): ?array
@@ -635,7 +841,7 @@ class IntelReportRefresher
                 'category' => 'no_pve_wallet_history',
                 'score' => 10,
                 'title' => 'No bounty or mission wallet history',
-                'details' => sprintf('%s has no monitored character wallet journal entries with bounty or mission reward references.', $user->name),
+                'details' => sprintf('%s has no linked character wallet journal entries with bounty or mission reward references.', $user->name),
                 'meta' => [
                     'ref_type_patterns' => ['%bounty%', '%mission%'],
                 ],
@@ -658,7 +864,7 @@ class IntelReportRefresher
                 'category' => 'limited_recent_wallet_activity',
                 'score' => 10,
                 'title' => 'Limited recent wallet activity',
-                'details' => sprintf('%s has only %d wallet journal or market transaction rows across monitored characters in the last 30 days.',
+                'details' => sprintf('%s has only %d wallet journal or market transaction rows across linked account characters in the last 30 days.',
                     $user->name,
                     $recentWalletActivity
                 ),
@@ -723,7 +929,7 @@ class IntelReportRefresher
                 'category' => 'hostile_corporation_history',
                 'score' => min(30, 18 + (($hostileHistories->count() - 1) * 4)),
                 'title' => 'Past corporation overlap with hostile or negative contacts',
-                'details' => sprintf('%s has monitored characters with prior corporation history matching configured hostile or monitored negative-contact entities.', $user->name),
+                'details' => sprintf('%s has linked account characters with prior corporation history matching configured hostile or monitored negative-contact entities.', $user->name),
                 'meta' => [
                     'matches' => $hostileHistories->take(10)->map(fn ($row) => [
                         'character_id' => (int) $row->character_id,
@@ -772,7 +978,7 @@ class IntelReportRefresher
             $recentScore = $recentHistoryCount >= 3 ? min(4, $recentHistoryCount - 2) : 0;
             $evidence->push([
                 'category' => 'corporation_history_churn',
-                'score' => min(20, 6 + ($excessCorporations * 2) + $recentScore),
+                'score' => 10,
                 'title' => 'Frequent corporation changes',
                 'details' => sprintf('%s has %d unique corporations across %s years of corporation history; rule of thumb allows about %d.',
                     $user->name,
@@ -822,9 +1028,10 @@ class IntelReportRefresher
         $aging = $overlaps->where('overlap_age_bucket', 'aging');
         $old = $overlaps->where('overlap_age_bucket', 'old');
         $unknownAge = $overlaps->where('overlap_age_bucket', 'unknown');
+        $closeDepartures = $overlaps->where('close_departure', true);
         $recentSameTime = $overlaps->filter(fn ($match) => data_get($match, 'same_time') && data_get($match, 'overlap_age_bucket') === 'recent');
         $recentDifferentTime = $overlaps->filter(fn ($match) => !data_get($match, 'same_time') && data_get($match, 'both_recent'));
-        $score = $this->employmentOverlapScore($overlaps, $recentSameTime, $recentDifferentTime);
+        $score = $this->employmentOverlapScore($overlaps, $closeDepartures, $recentSameTime, $recentDifferentTime);
 
         $evidence->push([
             'category' => 'hostile_employment_overlap',
@@ -837,6 +1044,7 @@ class IntelReportRefresher
             'meta' => [
                 'same_time_count' => $sameTime->count(),
                 'different_time_count' => $overlaps->count() - $sameTime->count(),
+                'close_departure_count' => $closeDepartures->count(),
                 'recent_same_time_count' => $recentSameTime->count(),
                 'recent_different_time_count' => $recentDifferentTime->count(),
                 'recent_count' => $recent->count(),
@@ -850,8 +1058,12 @@ class IntelReportRefresher
         ]);
     }
 
-    private function employmentOverlapScore($overlaps, $recentSameTime, $recentDifferentTime): int
+    private function employmentOverlapScore($overlaps, $closeDepartures, $recentSameTime, $recentDifferentTime): int
     {
+        if ($closeDepartures->isNotEmpty()) {
+            return 100;
+        }
+
         if ($recentSameTime->isNotEmpty()) {
             return 45;
         }
@@ -869,6 +1081,10 @@ class IntelReportRefresher
 
     private function employmentOverlapScoreRule(int $score): string
     {
+        if ($score === 100) {
+            return 'Monitored and hostile characters left the same corporation within 10 days of each other.';
+        }
+
         if ($score === 45) {
             return 'Same-corporation employment overlapped in the last two years.';
         }
@@ -878,6 +1094,363 @@ class IntelReportRefresher
         }
 
         return 'Historical overlap only; monitored character was not in that corporation during the last two years, so this is capped at low severity.';
+    }
+
+    private function addHostileKillmailEvidence(User $user, $characterIds, $hostileEntityIds, $evidence): void
+    {
+        if ($characterIds->isEmpty()
+            || $hostileEntityIds->isEmpty()
+            || !Schema::hasTable('killmail_attackers')
+            || !Schema::hasTable('killmail_victims')
+            || !Schema::hasColumn('killmail_attackers', 'character_id')
+            || !Schema::hasColumn('killmail_victims', 'character_id')) {
+            return;
+        }
+
+        $hostileIds = $hostileEntityIds->map(fn ($id) => (int) $id)->filter()->unique()->values();
+        $hasKillmailDetails = Schema::hasTable('killmail_details');
+
+        $monitoredVictims = DB::table('killmail_victims as monitored')
+            ->join('killmail_attackers as hostile', 'hostile.killmail_id', '=', 'monitored.killmail_id')
+            ->when($hasKillmailDetails, fn ($query) => $query->leftJoin('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id'))
+            ->whereIn('monitored.character_id', $characterIds->all())
+            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'hostile', $hostileIds))
+            ->select($this->killmailEvidenceSelects('monitored', 'hostile', $hasKillmailDetails, 'victim', 'hostile_attacker', true))
+            ->get();
+
+        $monitoredAttackers = DB::table('killmail_attackers as monitored')
+            ->join('killmail_victims as hostile', 'hostile.killmail_id', '=', 'monitored.killmail_id')
+            ->when($hasKillmailDetails, fn ($query) => $query->leftJoin('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id'))
+            ->whereIn('monitored.character_id', $characterIds->all())
+            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'hostile', $hostileIds))
+            ->select($this->killmailEvidenceSelects('monitored', 'hostile', $hasKillmailDetails, 'attacker', 'hostile_victim', false))
+            ->get();
+
+        $sameSideAttackers = DB::table('killmail_attackers as monitored')
+            ->join('killmail_attackers as hostile', 'hostile.killmail_id', '=', 'monitored.killmail_id')
+            ->when($hasKillmailDetails, fn ($query) => $query->leftJoin('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id'))
+            ->whereIn('monitored.character_id', $characterIds->all())
+            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'hostile', $hostileIds))
+            ->where(function ($query) {
+                $query->whereColumn('hostile.character_id', '!=', 'monitored.character_id')
+                    ->orWhereNull('hostile.character_id');
+            })
+            ->select($this->killmailEvidenceSelects('monitored', 'hostile', $hasKillmailDetails, 'attacker', 'same_side_attacker', true))
+            ->get();
+
+        $matches = $monitoredVictims
+            ->merge($monitoredAttackers)
+            ->merge($sameSideAttackers)
+            ->unique(fn ($row) => implode(':', [
+                $row->killmail_id,
+                $row->relationship,
+                $row->monitored_character_id,
+                $row->hostile_character_id,
+                $row->hostile_corporation_id,
+                $row->hostile_alliance_id,
+            ]))
+            ->values();
+
+        if ($matches->isEmpty()) {
+            return;
+        }
+
+        $characterNames = $this->characterNames($matches->pluck('monitored_character_id')->merge($matches->pluck('hostile_character_id')));
+        $corporationNames = $this->corporationNames($matches->pluck('hostile_corporation_id')->filter()->unique()->values());
+        $allianceNames = $this->allianceNames($matches->pluck('hostile_alliance_id')->filter()->unique()->values());
+        $shipNames = $this->typeNames($matches->pluck('monitored_ship_type_id')->merge($matches->pluck('hostile_ship_type_id')));
+        $systemNames = $this->solarSystemNames($matches->pluck('solar_system_id'));
+        $sameSideCount = $matches->where('relationship', 'same_side_attacker')->count();
+        $opposedCount = $matches->count() - $sameSideCount;
+        $recentSameSideCount = $matches
+            ->where('relationship', 'same_side_attacker')
+            ->filter(fn ($row) => $this->ageDays($row->killmail_time) !== null && $this->ageDays($row->killmail_time) <= 730)
+            ->count();
+        $oldSameSideCount = $sameSideCount - $recentSameSideCount;
+        $recentOpposedCount = $matches
+            ->reject(fn ($row) => $row->relationship === 'same_side_attacker')
+            ->filter(fn ($row) => $this->ageDays($row->killmail_time) !== null && $this->ageDays($row->killmail_time) <= 730)
+            ->count();
+        $score = $this->hostileKillmailScore($recentSameSideCount, $oldSameSideCount, $recentOpposedCount, $opposedCount - $recentOpposedCount);
+
+        $evidence->push([
+            'category' => 'hostile_killmail',
+            'score' => $score,
+            'title' => $sameSideCount > 0 ? 'Killmails on the same side as hostile entities' : 'Killmails involving hostile entities',
+            'details' => sprintf('%s has linked account characters appearing on %d killmail%s with configured hostile or monitored-negative entities%s.',
+                $user->name,
+                $matches->count(),
+                $matches->count() === 1 ? '' : 's',
+                $sameSideCount > 0 ? ', including same-side attacker participation' : ''
+            ),
+            'meta' => [
+                'same_side_count' => $sameSideCount,
+                'recent_same_side_count' => $recentSameSideCount,
+                'old_same_side_count' => $oldSameSideCount,
+                'opposed_count' => $opposedCount,
+                'recent_opposed_count' => $recentOpposedCount,
+                'total_count' => $matches->count(),
+                'score_rule' => $this->hostileKillmailScoreRule($recentSameSideCount, $oldSameSideCount, $recentOpposedCount),
+                'matches' => $matches
+                    ->sortByDesc(fn ($row) => $row->killmail_time ?: $row->killmail_id)
+                    ->take(20)
+                    ->map(function ($row) use ($hostileIds, $characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames) {
+                        $matchedEntity = $this->matchedHostileKillmailEntity($row, $hostileIds);
+
+                        return [
+                            'killmail_id' => (int) $row->killmail_id,
+                            'killmail_time' => $this->dateString($row->killmail_time),
+                            'age_days' => $this->ageDays($row->killmail_time),
+                            'recency_bucket' => $this->ageDays($row->killmail_time) === null ? 'unknown' : ($this->ageDays($row->killmail_time) <= 730 ? 'recent' : 'old'),
+                            'solar_system_id' => $row->solar_system_id ? (int) $row->solar_system_id : null,
+                            'solar_system_name' => $row->solar_system_id ? $systemNames->get((int) $row->solar_system_id) : null,
+                            'relationship' => $row->relationship,
+                            'monitored_side' => $row->monitored_side,
+                            'monitored_character_id' => (int) $row->monitored_character_id,
+                            'monitored_character_name' => $characterNames->get((int) $row->monitored_character_id),
+                            'monitored_corporation_id' => $row->monitored_corporation_id ? (int) $row->monitored_corporation_id : null,
+                            'monitored_alliance_id' => $row->monitored_alliance_id ? (int) $row->monitored_alliance_id : null,
+                            'monitored_ship_type_id' => $row->monitored_ship_type_id ? (int) $row->monitored_ship_type_id : null,
+                            'monitored_ship_type_name' => $row->monitored_ship_type_id ? $shipNames->get((int) $row->monitored_ship_type_id) : null,
+                            'hostile_character_id' => $row->hostile_character_id ? (int) $row->hostile_character_id : null,
+                            'hostile_character_name' => $row->hostile_character_id ? $characterNames->get((int) $row->hostile_character_id) : null,
+                            'hostile_corporation_id' => $row->hostile_corporation_id ? (int) $row->hostile_corporation_id : null,
+                            'hostile_corporation_name' => $row->hostile_corporation_id ? $corporationNames->get((int) $row->hostile_corporation_id) : null,
+                            'hostile_alliance_id' => $row->hostile_alliance_id ? (int) $row->hostile_alliance_id : null,
+                            'hostile_alliance_name' => $row->hostile_alliance_id ? $allianceNames->get((int) $row->hostile_alliance_id) : null,
+                            'hostile_ship_type_id' => $row->hostile_ship_type_id ? (int) $row->hostile_ship_type_id : null,
+                            'hostile_ship_type_name' => $row->hostile_ship_type_id ? $shipNames->get((int) $row->hostile_ship_type_id) : null,
+                            'matched_entity_type' => $matchedEntity['type'],
+                            'matched_entity_id' => $matchedEntity['id'],
+                            'final_blow' => (bool) $row->hostile_final_blow,
+                            'damage_done' => $row->hostile_damage_done !== null ? (int) $row->hostile_damage_done : null,
+                        ];
+                    })
+                    ->values()
+                    ->all(),
+            ],
+        ]);
+    }
+
+    private function hostileKillmailScore(int $recentSameSideCount, int $oldSameSideCount, int $recentOpposedCount, int $oldOpposedCount): int
+    {
+        if ($recentSameSideCount > 0) {
+            return 45;
+        }
+
+        if ($oldSameSideCount > 0) {
+            return min(25, 12 + ($oldSameSideCount * 3));
+        }
+
+        if ($recentOpposedCount > 0) {
+            return min(20, 10 + ($recentOpposedCount * 2));
+        }
+
+        return min(8, max(2, $oldOpposedCount * 2));
+    }
+
+    private function hostileKillmailScoreRule(int $recentSameSideCount, int $oldSameSideCount, int $recentOpposedCount): string
+    {
+        if ($recentSameSideCount > 0) {
+            return 'Same-side hostile killmail activity in the last two years is treated as high-signal evidence.';
+        }
+
+        if ($oldSameSideCount > 0) {
+            return 'Same-side hostile killmail activity older than two years is still shown but down-weighted.';
+        }
+
+        if ($recentOpposedCount > 0) {
+            return 'Recent opposed killmail activity with hostile entities is contextual and lower severity than same-side activity.';
+        }
+
+        return 'Only older opposed killmail activity was found, so the score is low.';
+    }
+
+    private function whereHostileKillmailParty($query, string $alias, $hostileIds)
+    {
+        return $query->whereIn($alias . '.character_id', $hostileIds->all())
+            ->orWhereIn($alias . '.corporation_id', $hostileIds->all())
+            ->orWhereIn($alias . '.alliance_id', $hostileIds->all());
+    }
+
+    private function killmailEvidenceSelects(string $monitoredAlias, string $hostileAlias, bool $hasKillmailDetails, string $monitoredSide, string $relationship, bool $hostilePartyIsAttacker): array
+    {
+        $selects = [
+            $monitoredAlias . '.killmail_id',
+            DB::raw("'" . $monitoredSide . "' as monitored_side"),
+            DB::raw("'" . $relationship . "' as relationship"),
+            DB::raw($monitoredAlias . '.character_id as monitored_character_id'),
+            DB::raw($monitoredAlias . '.corporation_id as monitored_corporation_id'),
+            DB::raw($monitoredAlias . '.alliance_id as monitored_alliance_id'),
+            DB::raw($monitoredAlias . '.ship_type_id as monitored_ship_type_id'),
+            DB::raw($hostileAlias . '.character_id as hostile_character_id'),
+            DB::raw($hostileAlias . '.corporation_id as hostile_corporation_id'),
+            DB::raw($hostileAlias . '.alliance_id as hostile_alliance_id'),
+            DB::raw($hostileAlias . '.ship_type_id as hostile_ship_type_id'),
+        ];
+
+        if ($hostilePartyIsAttacker && Schema::hasColumn('killmail_attackers', 'final_blow')) {
+            $selects[] = DB::raw($hostileAlias . '.final_blow as hostile_final_blow');
+        } else {
+            $selects[] = DB::raw('null as hostile_final_blow');
+        }
+
+        if ($hostilePartyIsAttacker && Schema::hasColumn('killmail_attackers', 'damage_done')) {
+            $selects[] = DB::raw($hostileAlias . '.damage_done as hostile_damage_done');
+        } else {
+            $selects[] = DB::raw('null as hostile_damage_done');
+        }
+
+        if ($hasKillmailDetails) {
+            $selects[] = DB::raw('details.killmail_time as killmail_time');
+            $selects[] = DB::raw('details.solar_system_id as solar_system_id');
+        } else {
+            $selects[] = DB::raw('null as killmail_time');
+            $selects[] = DB::raw('null as solar_system_id');
+        }
+
+        return $selects;
+    }
+
+    private function matchedHostileKillmailEntity($row, $hostileIds): array
+    {
+        $hostileLookup = $hostileIds->flip();
+
+        foreach ([
+            'character' => $row->hostile_character_id,
+            'corporation' => $row->hostile_corporation_id,
+            'alliance' => $row->hostile_alliance_id,
+        ] as $type => $id) {
+            if ($id && $hostileLookup->has((int) $id)) {
+                return ['type' => $type, 'id' => (int) $id];
+            }
+        }
+
+        return ['type' => null, 'id' => null];
+    }
+
+    private function addHostileContractEvidence(User $user, $characterIds, $hostileEntityIds, $evidence): void
+    {
+        if ($characterIds->isEmpty()
+            || $hostileEntityIds->isEmpty()
+            || !Schema::hasTable('character_contracts')
+            || !Schema::hasTable('contract_details')) {
+            return;
+        }
+
+        $hostileIds = $hostileEntityIds->map(fn ($id) => (int) $id)->filter()->unique()->values();
+        $contracts = DB::table('character_contracts')
+            ->join('contract_details', 'contract_details.contract_id', '=', 'character_contracts.contract_id')
+            ->whereIn('character_contracts.character_id', $characterIds->all())
+            ->where(function ($query) use ($hostileIds) {
+                $query->whereIn('contract_details.issuer_id', $hostileIds->all())
+                    ->orWhereIn('contract_details.issuer_corporation_id', $hostileIds->all())
+                    ->orWhereIn('contract_details.assignee_id', $hostileIds->all())
+                    ->orWhereIn('contract_details.acceptor_id', $hostileIds->all());
+            })
+            ->orderByDesc('contract_details.date_issued')
+            ->get([
+                'character_contracts.character_id',
+                'contract_details.contract_id',
+                'contract_details.issuer_id',
+                'contract_details.issuer_corporation_id',
+                'contract_details.assignee_id',
+                'contract_details.acceptor_id',
+                'contract_details.type',
+                'contract_details.status',
+                'contract_details.title',
+                'contract_details.for_corporation',
+                'contract_details.availability',
+                'contract_details.date_issued',
+                'contract_details.date_accepted',
+                'contract_details.date_completed',
+                'contract_details.price',
+                'contract_details.reward',
+                'contract_details.collateral',
+            ]);
+
+        if ($contracts->isEmpty()) {
+            return;
+        }
+
+        $characterNames = $this->characterNames($contracts->pluck('character_id')->merge($contracts->pluck('issuer_id'))->merge($contracts->pluck('assignee_id'))->merge($contracts->pluck('acceptor_id')));
+        $corporationNames = $this->corporationNames($contracts->pluck('issuer_corporation_id'));
+        $latestDate = $contracts->pluck('date_issued')->filter()->sortDesc()->first();
+        $ageDays = $this->ageDays($latestDate);
+        $recentCount = $contracts->filter(fn ($row) => $this->ageDays($row->date_issued) !== null && $this->ageDays($row->date_issued) <= 730)->count();
+        $directAssignedCount = $contracts->filter(fn ($row) => $row->assignee_id || $row->acceptor_id)->count();
+        $baseScore = 18 + ($directAssignedCount * 4) + ($recentCount > 0 ? 8 : 0);
+        $score = $ageDays !== null && $ageDays > 730 ? min(18, max(6, (int) floor($baseScore * 0.5))) : min(38, $baseScore);
+
+        $evidence->push([
+            'category' => 'hostile_contract',
+            'score' => $score,
+            'title' => 'Direct contracts involving hostile entities',
+            'details' => sprintf('%s has %d character contract%s involving configured hostile or monitored-negative entities. Direct contracts are more intentional than open-market trades.',
+                $user->name,
+                $contracts->count(),
+                $contracts->count() === 1 ? '' : 's'
+            ),
+            'meta' => [
+                'contract_count' => $contracts->count(),
+                'recent_count' => $recentCount,
+                'direct_assigned_count' => $directAssignedCount,
+                'latest_contract_at' => $this->dateString($latestDate),
+                'latest_age_days' => $ageDays,
+                'score_rule' => $ageDays !== null && $ageDays > 730
+                    ? 'Contract evidence older than two years is down-weighted.'
+                    : 'Recent or directly assigned hostile contracts are treated as medium-high signal evidence.',
+                'contracts' => $contracts->take(20)->map(function ($contract) use ($characterNames, $corporationNames, $hostileIds) {
+                    $matched = $this->matchedHostileContractEntity($contract, $hostileIds);
+
+                    return [
+                        'character_id' => (int) $contract->character_id,
+                        'character_name' => $characterNames->get((int) $contract->character_id),
+                        'contract_id' => (int) $contract->contract_id,
+                        'title' => $contract->title,
+                        'type' => $contract->type,
+                        'status' => $contract->status,
+                        'availability' => $contract->availability,
+                        'for_corporation' => (bool) $contract->for_corporation,
+                        'date_issued' => $this->dateString($contract->date_issued),
+                        'date_accepted' => $this->dateString($contract->date_accepted),
+                        'date_completed' => $this->dateString($contract->date_completed),
+                        'age_days' => $this->ageDays($contract->date_issued),
+                        'issuer_id' => $contract->issuer_id ? (int) $contract->issuer_id : null,
+                        'issuer_name' => $contract->issuer_id ? $characterNames->get((int) $contract->issuer_id) : null,
+                        'issuer_corporation_id' => $contract->issuer_corporation_id ? (int) $contract->issuer_corporation_id : null,
+                        'issuer_corporation_name' => $contract->issuer_corporation_id ? $corporationNames->get((int) $contract->issuer_corporation_id) : null,
+                        'assignee_id' => $contract->assignee_id ? (int) $contract->assignee_id : null,
+                        'assignee_name' => $contract->assignee_id ? $characterNames->get((int) $contract->assignee_id) : null,
+                        'acceptor_id' => $contract->acceptor_id ? (int) $contract->acceptor_id : null,
+                        'acceptor_name' => $contract->acceptor_id ? $characterNames->get((int) $contract->acceptor_id) : null,
+                        'matched_entity_type' => $matched['type'],
+                        'matched_entity_id' => $matched['id'],
+                        'price' => (float) $contract->price,
+                        'reward' => (float) $contract->reward,
+                        'collateral' => (float) $contract->collateral,
+                    ];
+                })->values()->all(),
+            ],
+        ]);
+    }
+
+    private function matchedHostileContractEntity($contract, $hostileIds): array
+    {
+        $hostileLookup = $hostileIds->flip();
+
+        foreach ([
+            'issuer' => $contract->issuer_id,
+            'issuer_corporation' => $contract->issuer_corporation_id,
+            'assignee' => $contract->assignee_id,
+            'acceptor' => $contract->acceptor_id,
+        ] as $type => $id) {
+            if ($id && $hostileLookup->has((int) $id)) {
+                return ['type' => $type, 'id' => (int) $id];
+            }
+        }
+
+        return ['type' => null, 'id' => null];
     }
 
     private function addFootprintEvidence(User $user, $characters, $characterIds, $hostileEntityIds, $evidence): void
@@ -907,7 +1480,7 @@ class IntelReportRefresher
                 'category' => 'thin_seat_footprint',
                 'score' => 14,
                 'title' => 'Thin SeAT footprint for account age',
-                'details' => sprintf('%s has an older monitored character history but only %d visible SeAT activity rows across key datasets.',
+                'details' => sprintf('%s has an older linked-character history but only %d visible SeAT activity rows across key datasets.',
                     $user->name,
                     $activityCount
                 ),
@@ -925,7 +1498,7 @@ class IntelReportRefresher
                 'category' => 'no_productive_footprint',
                 'score' => 12,
                 'title' => 'Little PvE, industry, or market footprint',
-                'details' => sprintf('%s has only %d wallet, mining, industry, or market rows across monitored characters.',
+                'details' => sprintf('%s has only %d wallet, mining, industry, or market rows across linked account characters.',
                     $user->name,
                     $productiveFootprint
                 ),
@@ -941,7 +1514,7 @@ class IntelReportRefresher
                 'category' => 'age_skill_mismatch',
                 'score' => 12,
                 'title' => 'Character age and skillpoints do not line up',
-                'details' => sprintf('%s has monitored characters at least %d days old but only %s total monitored SP.',
+                'details' => sprintf('%s has linked account characters at least %d days old but only %s total linked-character SP.',
                     $user->name,
                     $oldestAgeDays,
                     number_format($totalSkillpoints)
@@ -959,7 +1532,7 @@ class IntelReportRefresher
                 'category' => 'low_assets',
                 'score' => $counts['assets'] === 0 ? 12 : 8,
                 'title' => 'No or low visible assets',
-                'details' => sprintf('%s has %d visible asset row%s across monitored characters.',
+                'details' => sprintf('%s has %d visible asset row%s across linked account characters.',
                     $user->name,
                     $counts['assets'],
                     $counts['assets'] === 1 ? '' : 's'
@@ -975,7 +1548,7 @@ class IntelReportRefresher
                 'category' => 'no_saved_fittings',
                 'score' => 12,
                 'title' => 'No saved fittings on account characters',
-                'details' => sprintf('%s has no saved fittings across monitored characters on this SeAT account.', $user->name),
+                'details' => sprintf('%s has no saved fittings across linked characters on this SeAT account.', $user->name),
                 'meta' => [
                     'saved_fitting_count' => 0,
                     'character_count' => $characterIds->count(),
@@ -988,7 +1561,7 @@ class IntelReportRefresher
                 'category' => 'no_lossmails',
                 'score' => 12,
                 'title' => 'No recorded lossmails',
-                'details' => sprintf('%s has no recorded lossmails across monitored characters. This can indicate a thin or carefully-managed public footprint.', $user->name),
+                'details' => sprintf('%s has no recorded lossmails across linked account characters. This can indicate a thin or carefully-managed public footprint.', $user->name),
                 'meta' => [
                     'lossmail_count' => 0,
                     'character_count' => $characterIds->count(),
@@ -1086,7 +1659,7 @@ class IntelReportRefresher
             'category' => 'low_asset_value',
             'score' => $estimatedValue < 100000000 ? 18 : 14,
             'title' => 'Low total asset value',
-            'details' => sprintf('%s has about %s ISK in priced visible assets across monitored characters, below the %s ISK threshold.',
+            'details' => sprintf('%s has about %s ISK in priced visible assets across linked account characters, below the %s ISK threshold.',
                 $user->name,
                 number_format($estimatedValue, 0),
                 number_format($threshold)
@@ -1198,7 +1771,7 @@ class IntelReportRefresher
         ]);
     }
 
-    private function monitoredCharacters()
+    private function monitoredCharacterIds()
     {
         $entities = IntelEntity::query()
             ->where('category', IntelEntity::CATEGORY_MONITORED)
@@ -1208,7 +1781,6 @@ class IntelReportRefresher
         $allianceIds = $entities->where('entity_type', 'alliance')->pluck('entity_id')->map(fn ($id) => (int) $id)->all();
 
         return CharacterInfo::query()
-            ->with('skillpoints', 'user', 'affiliation.corporation', 'affiliation.alliance')
             ->when(!empty($corporationIds) || !empty($allianceIds), function ($query) use ($corporationIds, $allianceIds) {
                 $query->where(function ($inner) use ($corporationIds, $allianceIds) {
                     if (!empty($corporationIds)) {
@@ -1230,8 +1802,61 @@ class IntelReportRefresher
             ->when(empty($corporationIds) && empty($allianceIds), function ($query) {
                 $query->where('character_id', 0);
             })
+            ->pluck('character_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    private function accountCharactersForUsers($userIds)
+    {
+        $userIds = collect($userIds)->map(fn ($id) => (int) $id)->filter()->unique()->values();
+
+        if ($userIds->isEmpty()) {
+            return collect();
+        }
+
+        $tokenRows = RefreshToken::withTrashed()
+            ->whereIn('user_id', $userIds->all())
+            ->get(['character_id', 'user_id']);
+
+        $characterUserIds = $tokenRows
+            ->groupBy(fn ($token) => (int) $token->character_id)
+            ->map(fn ($tokens) => (int) $tokens->first()->user_id);
+        $characterIds = $characterUserIds->keys()->map(fn ($id) => (int) $id)->filter()->unique()->values();
+
+        if ($characterIds->isEmpty()) {
+            return collect();
+        }
+
+        return CharacterInfo::query()
+            ->with('skillpoints', 'user', 'affiliation.corporation', 'affiliation.alliance')
+            ->whereIn('character_id', $characterIds->all())
             ->orderBy('name')
-            ->get();
+            ->get()
+            ->map(function ($character) use ($characterUserIds) {
+                $character->spy_hunter_account_user_id = $characterUserIds->get((int) $character->character_id);
+
+                return $character;
+            });
+    }
+
+    private function userIdsForCharacters($characterIds)
+    {
+        $characterIds = collect($characterIds)->map(fn ($id) => (int) $id)->filter()->unique()->values();
+
+        if ($characterIds->isEmpty()) {
+            return collect();
+        }
+
+        return RefreshToken::withTrashed()
+            ->whereIn('character_id', $characterIds->all())
+            ->pluck('user_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter()
+            ->unique()
+            ->values();
     }
 
     private function monitoredCorporationIds()
@@ -1335,6 +1960,58 @@ class IntelReportRefresher
             ->pluck('name', 'corporation_id');
     }
 
+    private function characterNames($characterIds)
+    {
+        $characterIds = collect($characterIds)->filter()->map(fn ($id) => (int) $id)->unique()->values();
+
+        if ($characterIds->isEmpty() || !Schema::hasTable('character_infos')) {
+            return collect();
+        }
+
+        return DB::table('character_infos')
+            ->whereIn('character_id', $characterIds->all())
+            ->pluck('name', 'character_id');
+    }
+
+    private function allianceNames($allianceIds)
+    {
+        $allianceIds = collect($allianceIds)->filter()->map(fn ($id) => (int) $id)->unique()->values();
+
+        if ($allianceIds->isEmpty() || !Schema::hasTable('alliances')) {
+            return collect();
+        }
+
+        return DB::table('alliances')
+            ->whereIn('alliance_id', $allianceIds->all())
+            ->pluck('name', 'alliance_id');
+    }
+
+    private function typeNames($typeIds)
+    {
+        $typeIds = collect($typeIds)->filter()->map(fn ($id) => (int) $id)->unique()->values();
+
+        if ($typeIds->isEmpty() || !Schema::hasTable('invTypes')) {
+            return collect();
+        }
+
+        return DB::table('invTypes')
+            ->whereIn('typeID', $typeIds->all())
+            ->pluck('typeName', 'typeID');
+    }
+
+    private function solarSystemNames($solarSystemIds)
+    {
+        $solarSystemIds = collect($solarSystemIds)->filter()->map(fn ($id) => (int) $id)->unique()->values();
+
+        if ($solarSystemIds->isEmpty() || !Schema::hasTable('solar_systems')) {
+            return collect();
+        }
+
+        return DB::table('solar_systems')
+            ->whereIn('system_id', $solarSystemIds->all())
+            ->pluck('name', 'system_id');
+    }
+
     private function dateString($value): ?string
     {
         if (!$value) {
@@ -1342,6 +2019,15 @@ class IntelReportRefresher
         }
 
         return method_exists($value, 'toDateString') ? $value->toDateString() : (string) $value;
+    }
+
+    private function ageDays($value): ?int
+    {
+        if (!$value) {
+            return null;
+        }
+
+        return now()->diffInDays(\Illuminate\Support\Carbon::parse($value));
     }
 
     private function isPublicIp(string $ip): bool

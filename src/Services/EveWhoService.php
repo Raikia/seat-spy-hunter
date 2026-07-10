@@ -203,6 +203,7 @@ class EveWhoService
                     $ageDays = $lastRelevantDate ? now()->diffInDays($lastRelevantDate) : null;
                     $localRecent = $this->employmentTouchesRecentWindow($local->start_date, $local->end_date);
                     $hostileRecent = $this->employmentTouchesRecentWindow($hostile->start_date, $hostile->end_date);
+                    $departureDeltaDays = $this->departureDeltaDays($local->end_date, $hostile->end_date);
                     $corporation = $corporationDetails->get((int) $local->corporation_id, []);
                     $allianceId = data_get($corporation, 'alliance_id');
 
@@ -223,6 +224,8 @@ class EveWhoService
                         'local_recent' => $localRecent,
                         'hostile_recent' => $hostileRecent,
                         'both_recent' => $localRecent && $hostileRecent,
+                        'close_departure' => $departureDeltaDays !== null && $departureDeltaDays <= 10,
+                        'departure_delta_days' => $departureDeltaDays,
                         'overlap_start_date' => $this->dateOnlyString(data_get($overlapWindow, 'start')),
                         'overlap_end_date' => $this->dateOnlyString(data_get($overlapWindow, 'end')),
                         'overlap_last_seen_date' => $this->dateOnlyString($lastRelevantDate),
@@ -412,6 +415,17 @@ class EveWhoService
         $end = $endDate ? \Carbon\Carbon::parse($endDate)->endOfDay() : now()->endOfDay();
 
         return $end->gte($windowStart) && (!$start || $start->lte(now()));
+    }
+
+    private function departureDeltaDays($localEndDate, $hostileEndDate): ?int
+    {
+        if (!$localEndDate || !$hostileEndDate) {
+            return null;
+        }
+
+        return \Carbon\Carbon::parse($localEndDate)
+            ->startOfDay()
+            ->diffInDays(\Carbon\Carbon::parse($hostileEndDate)->startOfDay());
     }
 
     private function monitoredCorporationIds(): Collection

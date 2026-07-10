@@ -31,7 +31,7 @@ class IntelDashboardController extends Controller
             ->when($reviewStatus === 'active', function ($query) {
                 $query->whereNotIn('review_status', ['cleared', 'permanently_cleared']);
             })
-            ->when(in_array($reviewStatus, ['new', 'reviewing', 'watchlisted', 'escalated', 'cleared', 'permanently_cleared'], true), function ($query) use ($reviewStatus) {
+            ->when(in_array($reviewStatus, ['new', 'reviewing', 'watchlisted', 'concerned', 'escalated', 'cleared', 'permanently_cleared'], true), function ($query) use ($reviewStatus) {
                 $query->where('review_status', $reviewStatus);
             })
             ->when($evidenceCategory && array_key_exists($evidenceCategory, $evidenceCategories), function ($query) use ($evidenceCategory) {
@@ -62,7 +62,7 @@ class IntelDashboardController extends Controller
                     $inner->orWhere('user_id', $search);
                 });
             })
-            ->orderByRaw("case when review_status = 'watchlisted' then 0 else 1 end")
+            ->orderByRaw("case review_status when 'escalated' then 0 when 'concerned' then 1 when 'watchlisted' then 2 else 3 end")
             ->orderByDesc('score')
             ->orderBy('character_name')
             ->get();
@@ -75,6 +75,8 @@ class IntelDashboardController extends Controller
             'critical' => (clone $activeReports)->where('rating', 'critical')->count(),
             'high' => (clone $activeReports)->where('rating', 'high')->count(),
             'watchlisted' => CharacterIntelReport::query()->where('review_status', 'watchlisted')->count(),
+            'concerned' => CharacterIntelReport::query()->where('review_status', 'concerned')->count(),
+            'escalated' => CharacterIntelReport::query()->where('review_status', 'escalated')->count(),
             'last_analyzed_at' => $lastAnalyzedAt ? Carbon::parse($lastAnalyzedAt)->toDateTimeString() : null,
         ];
 
@@ -89,6 +91,9 @@ class IntelDashboardController extends Controller
             'hostile_mail' => 'Hostile Mail',
             'hostile_wallet_direct' => 'Direct Wallet Dealings',
             'hostile_market_transaction' => 'Market Transactions',
+            'hostile_killmail' => 'Hostile Killmail',
+            'hostile_contract' => 'Hostile Contracts',
+            'risk_confidence' => 'Risk Confidence',
             'new_evidence_since_review' => 'New Evidence Since Review',
             'suppressed_signals' => 'Suppressed Evidence',
             'esi_coverage_health' => 'ESI Coverage Health',
@@ -140,7 +145,7 @@ class IntelDashboardController extends Controller
     public function updateReview(Request $request, CharacterIntelReport $report)
     {
         $data = $request->validate([
-            'review_status' => 'required|in:new,reviewing,cleared,permanently_cleared,watchlisted,escalated',
+            'review_status' => 'required|in:new,reviewing,cleared,permanently_cleared,watchlisted,concerned,escalated',
             'review_notes' => 'nullable|string|max:5000',
         ]);
 
@@ -159,7 +164,7 @@ class IntelDashboardController extends Controller
         $data = $request->validate([
             'report_ids' => 'required|array|min:1',
             'report_ids.*' => 'integer|exists:seat_spy_hunter_character_reports,id',
-            'review_status' => 'required|in:new,reviewing,cleared,permanently_cleared,watchlisted,escalated',
+            'review_status' => 'required|in:new,reviewing,cleared,permanently_cleared,watchlisted,concerned,escalated',
             'review_notes' => 'nullable|string|max:5000',
         ]);
 

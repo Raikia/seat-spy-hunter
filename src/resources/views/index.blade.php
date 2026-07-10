@@ -43,7 +43,19 @@
                 <div class="col-md col-6 mb-3">
                     <div class="border rounded p-3 h-100">
                         <small class="text-muted d-block">Watchlisted</small>
-                        <strong class="h4 mb-0 text-warning">{{ $summary['watchlisted'] }}</strong>
+                        <strong class="h4 mb-0 text-info">{{ $summary['watchlisted'] }}</strong>
+                    </div>
+                </div>
+                <div class="col-md col-6 mb-3">
+                    <div class="border rounded p-3 h-100">
+                        <small class="text-muted d-block">Concerned</small>
+                        <strong class="h4 mb-0 text-warning">{{ $summary['concerned'] }}</strong>
+                    </div>
+                </div>
+                <div class="col-md col-6 mb-3">
+                    <div class="border rounded p-3 h-100">
+                        <small class="text-muted d-block">Escalated</small>
+                        <strong class="h4 mb-0 text-danger">{{ $summary['escalated'] }}</strong>
                     </div>
                 </div>
                 <div class="col-md col-6 mb-3">
@@ -79,7 +91,7 @@
                 <div class="form-group col-md-2">
                     <label for="review_status">Review</label>
                     <select name="review_status" id="review_status" class="form-control">
-                        @foreach(['active' => 'Active Queue', 'new' => 'New', 'reviewing' => 'Reviewing', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'all' => 'All'] as $value => $label)
+                        @foreach(['active' => 'Active Queue', 'new' => 'New', 'reviewing' => 'Reviewing', 'watchlisted' => 'Watchlisted', 'concerned' => 'Concerned', 'escalated' => 'Escalated', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'all' => 'All'] as $value => $label)
                             <option value="{{ $value }}" {{ $reviewStatus === $value ? 'selected' : '' }}>{{ $label }}</option>
                         @endforeach
                     </select>
@@ -123,7 +135,7 @@
                     <div class="mr-2 mb-2 mb-md-0">
                         <label for="bulk_review_status" class="sr-only">Bulk Status</label>
                         <select name="review_status" id="bulk_review_status" class="form-control form-control-sm spy-hunter-bulk-status">
-                            @foreach(['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'] as $value => $label)
+                            @foreach(['new' => 'New', 'reviewing' => 'Reviewing', 'watchlisted' => 'Watchlisted', 'concerned' => 'Concerned', 'escalated' => 'Escalated', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared'] as $value => $label)
                                 <option value="{{ $value }}">{{ $label }}</option>
                             @endforeach
                         </select>
@@ -148,7 +160,7 @@
                                 <input type="checkbox" id="spy-hunter-select-all" aria-label="Select all visible reports">
                             </th>
                             <th>User Account</th>
-                            <th>Monitored Characters</th>
+                            <th>Account Characters</th>
                             <th>Primary Group</th>
                             <th>Risk</th>
                             <th>Signals</th>
@@ -164,6 +176,10 @@
                         @php
                             $accountUserId = $report->account_user_id ?: $report->user_id;
                             $accountCharacters = data_get(optional($report->evidence->firstWhere('category', 'account_characters'))->meta, 'characters', []);
+                            $accountConnectors = data_get(optional($report->evidence->firstWhere('category', 'account_connectors'))->meta, 'connectors', []);
+                            $confidenceEvidence = $report->evidence->firstWhere('category', 'risk_confidence');
+                            $confidenceLevel = data_get(optional($confidenceEvidence)->meta, 'level');
+                            $confidenceBadge = data_get(['high' => 'success', 'medium' => 'warning', 'low' => 'danger'], $confidenceLevel, 'secondary');
                             $hasNewEvidence = (bool) $report->evidence->firstWhere('category', 'new_evidence_since_review');
                             $hasSuppressedEvidence = (bool) $report->evidence->firstWhere('category', 'suppressed_signals');
                             $freshnessDays = $report->last_analyzed_at ? $report->last_analyzed_at->diffInDays(now()) : null;
@@ -179,8 +195,8 @@
                                 <small class="text-muted">User #{{ $accountUserId }}</small>
                                 <div class="mt-1">
                                     @php
-                                        $reviewLabels = ['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'];
-                                        $reviewBadge = data_get(['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'permanently_cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'], $report->review_status, 'secondary');
+                                        $reviewLabels = ['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'concerned' => 'Concerned', 'escalated' => 'Escalated'];
+                                        $reviewBadge = data_get(['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'permanently_cleared' => 'success', 'watchlisted' => 'info', 'concerned' => 'warning', 'escalated' => 'danger'], $report->review_status, 'secondary');
                                     @endphp
                                     <span class="badge badge-{{ $reviewBadge }}">{{ $reviewLabels[$report->review_status] ?? ucfirst($report->review_status ?: 'new') }}</span>
                                     @if($hasNewEvidence)
@@ -200,9 +216,12 @@
                                         @if(!empty($character['main']))
                                             <span class="badge badge-info">Main</span>
                                         @endif
+                                        @if(!empty($character['monitored']))
+                                            <span class="badge badge-primary">Monitored</span>
+                                        @endif
                                     </div>
                                 @empty
-                                    <span class="text-muted">No monitored characters captured</span>
+                                    <span class="text-muted">No linked characters captured</span>
                                 @endforelse
                                 @if(count($accountCharacters) > 3)
                                     <small class="text-muted">+{{ count($accountCharacters) - 3 }} more</small>
@@ -212,18 +231,22 @@
                                 {{ $report->corporation_name ?: $report->corporation_id }}<br>
                                 <small class="text-muted">{{ $report->alliance_name ?: ($report->alliance_id ?: 'No alliance') }}</small>
                             </td>
-                            <td data-order="{{ ($report->review_status === 'watchlisted' ? 100000 : 0) + $report->score }}">
+                            <td data-order="{{ data_get(['escalated' => 300000, 'concerned' => 200000, 'watchlisted' => 100000], $report->review_status, 0) + $report->score }}">
                                 @php
                                     $badge = data_get(['critical' => 'danger', 'high' => 'warning', 'watch' => 'info', 'clear' => 'success'], $report->rating, 'secondary');
                                 @endphp
                                 <span class="badge badge-{{ $badge }}">{{ ucfirst($report->rating) }}</span>
                                 <div class="small text-muted">{{ $report->score }}/100</div>
+                                @if($confidenceLevel)
+                                    <span class="badge badge-{{ $confidenceBadge }}">Confidence {{ ucfirst($confidenceLevel) }}</span>
+                                @endif
                             </td>
                             <td data-order="{{ $report->evidence_count }}">{{ $report->evidence_count }}</td>
                             <td data-order="{{ $report->hostile_contact_count + $report->hostile_mail_count + $report->hostile_wallet_count }}">
                                 <span class="small">Contacts {{ $report->hostile_contact_count }}</span><br>
                                 <span class="small">Mail {{ $report->hostile_mail_count }}</span><br>
-                                <span class="small">Wallet {{ $report->hostile_wallet_count }}</span>
+                                <span class="small">Wallet {{ $report->hostile_wallet_count }}</span><br>
+                                <span class="small">Connectors {{ count($accountConnectors) }}</span>
                             </td>
                             <td data-order="{{ $report->shared_ip_user_count + $report->vpn_ip_count }}">
                                 <span class="small">Shared users {{ $report->shared_ip_user_count }}</span><br>
@@ -231,7 +254,7 @@
                             </td>
                             <td data-order="{{ $report->skillpoints ?: 0 }}">
                                 {{ $report->skillpoints !== null ? number_format($report->skillpoints) : 'Unknown' }}<br>
-                                <small class="text-muted">{{ count($accountCharacters) }} monitored character{{ count($accountCharacters) === 1 ? '' : 's' }}</small>
+                                <small class="text-muted">{{ count($accountCharacters) }} linked character{{ count($accountCharacters) === 1 ? '' : 's' }}</small>
                             </td>
                             <td data-order="{{ optional($report->last_analyzed_at)->timestamp ?: 0 }}">
                                 @if($report->last_analyzed_at)
@@ -252,11 +275,6 @@
                             </td>
                         </tr>
                     @empty
-                        <tr>
-                            <td colspan="11" class="text-center text-muted py-5">
-                                No account spy hunter reports yet. Add monitored corporations or alliances in settings, then refresh reports.
-                            </td>
-                        </tr>
                     @endforelse
                     </tbody>
                 </table>
@@ -276,6 +294,9 @@
                 order: [[4, 'desc']],
                 pageLength: 50,
                 lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
+                language: {
+                    emptyTable: 'No account spy hunter reports match the selected filters.'
+                },
                 columnDefs: [
                     { orderable: false, searchable: false, targets: [0, 10] }
                 ]

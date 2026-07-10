@@ -91,10 +91,13 @@ class CharacterRiskAnalyzer
 
             $watchedCount = $matches->where('is_watched', true)->count();
             $blockedCount = $matches->where('is_blocked', true)->count();
+            $maxStanding = (float) $matches->max('standing');
+            $standingScore = $this->positiveStandingScore($maxStanding);
+            $baseScore = $this->settings->hostileInteractionScore() + (($matches->count() - 1) * 5) + $standingScore;
 
             $evidence->push([
                 'category' => 'hostile_contacts',
-                'score' => min(35, $this->settings->hostileInteractionScore() + (($matches->count() - 1) * 5)),
+                'score' => min(40, $baseScore),
                 'title' => 'Positive standings toward hostile contacts',
                 'details' => sprintf('%s has %d positive-standing contact match%s against configured hostile entities or entities your monitored groups mark negative: %s. Positive standings toward hostile entities are a stronger concern than ordinary negative-contact bookkeeping.',
                     $character->name,
@@ -111,10 +114,14 @@ class CharacterRiskAnalyzer
                             'standing' => (float) $contact->standing,
                             'watched' => (bool) $contact->is_watched,
                             'blocked' => (bool) $contact->is_blocked,
+                            'interpretation' => 'This character set positive standings toward an entity that is configured hostile or marked negative by a monitored group.',
                         ];
                     })->values()->all(),
                     'direction' => [
                         'relationship' => 'character_contact_list',
+                        'standing_direction' => 'character_positive_toward_hostile',
+                        'max_positive_standing' => $maxStanding,
+                        'standing_score_bonus' => $standingScore,
                         'watched_count' => $watchedCount,
                         'blocked_count' => $blockedCount,
                         'interpretation' => $watchedCount > 0 ? 'positive_standing_watchlist' : 'positive_standing_contact',
@@ -153,10 +160,15 @@ class CharacterRiskAnalyzer
             $latestSent = (clone $sentToHostiles)->with('recipients.entity')->orderByDesc('timestamp')->take(5)->get();
 
             $direction = $sentCount > 0 && $receivedCount > 0 ? 'bidirectional' : ($sentCount > 0 ? 'outbound' : 'inbound');
+            $latestTimestamp = collect([
+                optional($latestReceived->first())->timestamp,
+                optional($latestSent->first())->timestamp,
+            ])->filter()->sortDesc()->first();
+            $scoreContext = $this->freshnessAdjustedScore(15 + ($total * 3) + ($sentCount > 0 ? 5 : 0), $latestTimestamp, 8, 38);
 
             $evidence->push([
                 'category' => 'hostile_mail',
-                'score' => min(35, 15 + ($total * 3) + ($sentCount > 0 ? 5 : 0)),
+                'score' => $scoreContext['score'],
                 'title' => 'Mail interaction with hostile entities',
                 'details' => sprintf('%s has %d mail interaction%s involving hostile or negative-contact entities. Direction: %s.',
                     $character->name,
@@ -168,6 +180,8 @@ class CharacterRiskAnalyzer
                     'direction' => $direction,
                     'received' => $receivedCount,
                     'sent' => $sentCount,
+                    'latest_interaction_at' => $this->dateTimeString($latestTimestamp),
+                    'freshness' => $scoreContext,
                     'latest_received' => $latestReceived->map(function ($mail) use ($character) {
                         return [
                             'character_id' => (int) $character->character_id,
@@ -202,6 +216,10 @@ class CharacterRiskAnalyzer
 
         $journalQuery = CharacterWalletJournal::query()
             ->where('character_id', $character->character_id)
+            ->where(function ($query) {
+                $query->whereNull('ref_type')
+                    ->orWhere('ref_type', '<>', 'market_transaction');
+            })
             ->where(function ($query) use ($hostileEntityIds) {
                 $query->whereIn('first_party_id', $hostileEntityIds->all())
                     ->orWhereIn('second_party_id', $hostileEntityIds->all());
@@ -232,9 +250,11 @@ class CharacterRiskAnalyzer
             $journalDirection = $outgoingJournal > 0 && $incomingJournal > 0 ? 'bidirectional' : ($outgoingJournal > 0 ? 'outbound' : 'inbound_or_indirect');
 
             if ($journal > 0) {
+                $scoreContext = $this->freshnessAdjustedScore(22 + ($journal * 4) + ($outgoingJournal > 0 ? 5 : 0), optional($latestJournal->first())->date, 10, 42);
+
                 $evidence->push([
                     'category' => 'hostile_wallet_direct',
-                    'score' => min(40, 22 + ($journal * 4) + ($outgoingJournal > 0 ? 5 : 0)),
+                    'score' => $scoreContext['score'],
                     'title' => 'Direct wallet dealings with hostile entities',
                     'details' => sprintf('%s has %d wallet journal match%s involving hostile entities. Direction: %s. Direct donations, trades, contracts, or transfers are stronger concern than open-market activity.',
                         $character->name,
@@ -248,6 +268,8 @@ class CharacterRiskAnalyzer
                         'journal' => $journal,
                         'outgoing_journal' => $outgoingJournal,
                         'incoming_journal' => $incomingJournal,
+                        'latest_interaction_at' => $this->dateTimeString(optional($latestJournal->first())->date),
+                        'freshness' => $scoreContext,
                         'latest_journal' => $latestJournal->map(function ($entry) {
                             return [
                                 'character_id' => (int) $entry->character_id,
@@ -269,10 +291,11 @@ class CharacterRiskAnalyzer
             if ($transactions > 0) {
                 $buyCount = (clone $transactionQuery)->where('is_buy', true)->count();
                 $sellCount = (clone $transactionQuery)->where('is_buy', false)->count();
+                $scoreContext = $this->freshnessAdjustedScore(2 + $transactions, optional($latestTransactions->first())->date, 1, 10);
 
                 $evidence->push([
                     'category' => 'hostile_market_transaction',
-                    'score' => min(8, 2 + $transactions),
+                    'score' => $scoreContext['score'],
                     'title' => 'Market transactions with hostile entities',
                     'details' => sprintf('%s has %d market transaction match%s involving hostile entities. This is a low concern contextual signal because open-market trades are often incidental.',
                         $character->name,
@@ -284,6 +307,8 @@ class CharacterRiskAnalyzer
                         'transactions' => $transactions,
                         'buy_count' => $buyCount,
                         'sell_count' => $sellCount,
+                        'latest_interaction_at' => $this->dateTimeString(optional($latestTransactions->first())->date),
+                        'freshness' => $scoreContext,
                         'latest_transactions' => $latestTransactions->map(function ($transaction) {
                             return [
                                 'character_id' => (int) $transaction->character_id,
@@ -306,7 +331,9 @@ class CharacterRiskAnalyzer
 
     private function addLoginEvidence(CharacterInfo $character, Collection $evidence, array &$metrics): void
     {
-        $user = $character->user;
+        $user = !empty($character->spy_hunter_account_user_id)
+            ? User::find((int) $character->spy_hunter_account_user_id)
+            : $character->user;
 
         if (!$user || !$user->id) {
             return;
@@ -350,7 +377,7 @@ class CharacterRiskAnalyzer
             if ($sharedUserIds->isNotEmpty()) {
                 $evidence->push([
                     'category' => 'shared_ip',
-                    'score' => min(35, $this->settings->sharedIpScore() + (($sharedUserIds->count() - 1) * 5)),
+                    'score' => 30,
                     'title' => 'Shares login IPs with other SeAT users',
                     'details' => sprintf('%s has used IP addresses also seen on %d other SeAT user account%s.',
                         $character->name,
@@ -377,7 +404,7 @@ class CharacterRiskAnalyzer
 
             $evidence->push([
                 'category' => 'vpn_ip',
-                'score' => min(45, $this->settings->vpnScore() + (($suspiciousIps->count() - 1) * 5)),
+                'score' => 20,
                 'title' => 'Uses IPs marked as VPN/proxy/hosting',
                 'details' => sprintf('%s has login IP intelligence matches: %s.', $character->name, $labels),
                 'meta' => [
@@ -440,7 +467,7 @@ class CharacterRiskAnalyzer
                 'category' => 'missing_token',
                 'score' => 20,
                 'title' => 'Character is visible but has no SeAT token',
-                'details' => sprintf('%s is in a monitored group but no refresh token was found for this character.', $character->name),
+                'details' => sprintf('%s is linked to an in-scope SeAT account but no refresh token was found for this character.', $character->name),
                 'meta' => ['character_id' => (int) $character->character_id],
             ]);
 
@@ -584,5 +611,53 @@ class CharacterRiskAnalyzer
         return $value instanceof Carbon
             ? $value->toDateTimeString()
             : Carbon::parse($value)->toDateTimeString();
+    }
+
+    private function positiveStandingScore(float $standing): int
+    {
+        if ($standing >= 5.0) {
+            return 10;
+        }
+
+        if ($standing >= 1.0) {
+            return 5;
+        }
+
+        return 2;
+    }
+
+    private function freshnessAdjustedScore(int $baseScore, $latestDate, int $minimum, int $maximum): array
+    {
+        if (!$latestDate) {
+            return [
+                'score' => min($maximum, max($minimum, $baseScore)),
+                'age_days' => null,
+                'bucket' => 'unknown',
+                'rule' => 'No interaction date was available, so the base score was used.',
+            ];
+        }
+
+        $ageDays = Carbon::parse($latestDate)->diffInDays(now());
+
+        if ($ageDays <= 180) {
+            $score = $baseScore + 6;
+            $bucket = 'recent';
+            $rule = 'Recent interaction within 180 days adds points.';
+        } elseif ($ageDays <= 730) {
+            $score = $baseScore;
+            $bucket = 'current';
+            $rule = 'Interaction within two years keeps the base score.';
+        } else {
+            $score = (int) floor($baseScore * 0.5);
+            $bucket = 'old';
+            $rule = 'Interaction older than two years is down-weighted.';
+        }
+
+        return [
+            'score' => min($maximum, max($minimum, $score)),
+            'age_days' => $ageDays,
+            'bucket' => $bucket,
+            'rule' => $rule,
+        ];
     }
 }

@@ -29,6 +29,9 @@
         'hostile_wallet' => 'Hostile Wallet',
         'hostile_wallet_direct' => 'Direct Wallet',
         'hostile_market_transaction' => 'Market Trade',
+        'hostile_killmail' => 'Hostile Killmail',
+        'hostile_contract' => 'Hostile Contract',
+        'risk_confidence' => 'Risk Confidence',
         'new_evidence_since_review' => 'New Evidence',
         'shared_ip' => 'Shared IP',
         'vpn_ip' => 'VPN / Proxy',
@@ -71,6 +74,9 @@
         'hostile_wallet' => 'danger',
         'hostile_wallet_direct' => 'danger',
         'hostile_market_transaction' => 'warning',
+        'hostile_killmail' => 'danger',
+        'hostile_contract' => 'danger',
+        'risk_confidence' => 'primary',
         'new_evidence_since_review' => 'primary',
         'shared_ip' => 'warning',
         'vpn_ip' => 'warning',
@@ -85,14 +91,35 @@
         'new_character' => 'info',
         'suppressed_signals' => 'secondary',
     ];
-    $reviewLabels = ['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'];
-    $reviewBadge = ['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'permanently_cleared' => 'success', 'watchlisted' => 'warning', 'escalated' => 'danger'][$report->review_status] ?? 'secondary';
+    $reviewLabels = ['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'concerned' => 'Concerned', 'escalated' => 'Escalated'];
+    $reviewBadge = ['new' => 'secondary', 'reviewing' => 'info', 'cleared' => 'success', 'permanently_cleared' => 'success', 'watchlisted' => 'info', 'concerned' => 'warning', 'escalated' => 'danger'][$report->review_status] ?? 'secondary';
     $characterLink = function ($characterId, $label) {
         if (!$characterId) {
             return e($label ?: 'Unknown');
         }
 
         return '<a href="' . route('seatcore::character.view.sheet', ['character' => $characterId]) . '" target="_blank" rel="noopener noreferrer">' . e($label ?: $characterId) . '</a>';
+    };
+    $scoreBadge = function ($score, $fallback = 'secondary') {
+        $score = (int) $score;
+
+        if ($score >= 40) {
+            return 'danger';
+        }
+
+        if ($score >= 25) {
+            return 'warning';
+        }
+
+        if ($score >= 10) {
+            return 'info';
+        }
+
+        if ($score > 0) {
+            return 'secondary';
+        }
+
+        return $fallback ?: 'light';
     };
 @endphp
 
@@ -138,7 +165,7 @@
 	                            <div class="form-group col-md-3">
 	                                <label>Status</label>
 	                                <select name="review_status" class="form-control">
-	                                    @foreach(['new' => 'New', 'reviewing' => 'Reviewing', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared', 'watchlisted' => 'Watchlisted', 'escalated' => 'Escalated'] as $value => $label)
+	                                    @foreach(['new' => 'New', 'reviewing' => 'Reviewing', 'watchlisted' => 'Watchlisted', 'concerned' => 'Concerned', 'escalated' => 'Escalated', 'cleared' => 'Cleared', 'permanently_cleared' => 'Permanently Cleared'] as $value => $label)
 	                                        <option value="{{ $value }}" {{ $report->review_status === $value ? 'selected' : '' }}>{{ $label }}</option>
 	                                    @endforeach
 	                                </select>
@@ -172,11 +199,19 @@
 	                </div>
 
 	                <div class="row mb-3">
+                    @php
+                        $confidenceEvidence = $report->evidence->firstWhere('category', 'risk_confidence');
+                        $confidenceLevel = data_get(optional($confidenceEvidence)->meta, 'level');
+                        $confidenceBadge = data_get(['high' => 'success', 'medium' => 'warning', 'low' => 'danger'], $confidenceLevel, 'secondary');
+                    @endphp
 	                    <div class="col-md-3 col-6 mb-3">
                         <div class="border rounded p-3 h-100">
                             <small class="text-muted d-block">Risk</small>
                             <span class="badge badge-{{ $badge }}">{{ ucfirst($report->rating) }}</span>
                             <strong class="d-block h4 mb-0 mt-2">{{ $report->score }}/100</strong>
+                            @if($confidenceLevel)
+                                <span class="badge badge-{{ $confidenceBadge }}">Confidence {{ ucfirst($confidenceLevel) }}</span>
+                            @endif
                         </div>
                     </div>
                     <div class="col-md-3 col-6 mb-3">
@@ -197,7 +232,7 @@
                         <div class="border rounded p-3 h-100">
                             <small class="text-muted d-block">Account Characters</small>
                             <strong class="d-block">{{ $report->skillpoints !== null ? number_format($report->skillpoints) . ' SP' : 'Unknown SP' }}</strong>
-                            <span class="small text-muted">Total monitored SP</span>
+                            <span class="small text-muted">Total linked-character SP</span>
                         </div>
 	                    </div>
 	                </div>
@@ -248,7 +283,7 @@
                                     <tbody>
                                     @foreach($scoreEvidence as $row)
                                         <tr>
-                                            <td><span class="badge badge-{{ $categoryBadges[$row->category] ?? 'secondary' }}">{{ $categoryLabels[$row->category] ?? str_replace('_', ' ', ucfirst($row->category)) }}</span></td>
+                                            <td><span class="badge badge-{{ $scoreBadge($row->score, $categoryBadges[$row->category] ?? 'secondary') }}">{{ $categoryLabels[$row->category] ?? str_replace('_', ' ', ucfirst($row->category)) }}</span></td>
                                             <td>{{ $row->title }}</td>
                                             <td class="text-right">+{{ $row->score }}</td>
                                         </tr>
@@ -280,7 +315,7 @@
                             @else
                                 @foreach($report->evidence->take(5) as $evidence)
                                     <div class="mb-2">
-                                        <span class="badge badge-{{ $categoryBadges[$evidence->category] ?? 'secondary' }}">{{ $categoryLabels[$evidence->category] ?? str_replace('_', ' ', ucfirst($evidence->category)) }}</span>
+                                        <span class="badge badge-{{ $scoreBadge($evidence->score, $categoryBadges[$evidence->category] ?? 'secondary') }}">{{ $categoryLabels[$evidence->category] ?? str_replace('_', ' ', ucfirst($evidence->category)) }}</span>
                                         <strong class="ml-1">{{ $evidence->score }} pts</strong>
                                         <div class="small">{{ $evidence->title }}</div>
                                     </div>
@@ -324,7 +359,7 @@
                     $accountConnectors = data_get(optional($accountConnectorEvidence)->meta, 'connectors', []);
                 @endphp
                 @if(!empty($accountCharacters))
-                    <h6 class="mb-3">Monitored Characters</h6>
+                    <h6 class="mb-3">Account Characters</h6>
                     <div class="table-responsive mb-3">
                         <table class="table table-sm table-bordered mb-0">
                             <thead>
@@ -344,6 +379,9 @@
                                         <span class="text-muted small">({{ $character['character_id'] }})</span>
                                         @if(!empty($character['main']))
                                             <span class="badge badge-info">Main</span>
+                                        @endif
+                                        @if(!empty($character['monitored']))
+                                            <span class="badge badge-primary">Monitored Group</span>
                                         @endif
                                     </td>
                                     <td>{{ $character['corporation_name'] ?: ($character['corporation_id'] ?: 'Unknown') }}</td>
@@ -376,7 +414,11 @@
                                     $ipRiskScore = (int) data_get($ipIntel, 'risk_score', 0);
                                 @endphp
 	                            <tr>
-	                                <td>{{ $loginIp['ip'] }}</td>
+	                                <td>
+                                        <a href="https://whatismyipaddress.com/ip/{{ urlencode($loginIp['ip']) }}" target="_blank" rel="noopener noreferrer">
+                                            <code>{{ $loginIp['ip'] }}</code>
+                                        </a>
+                                    </td>
 	                                <td>
 	                                    @if(!empty($loginIp['public']))
 	                                        <span class="badge badge-info">Public</span>
@@ -496,7 +538,7 @@
                             $structuredKeys = [
                                 'characters', 'contacts', 'new_items', 'suppressed', 'corporations', 'matches',
                                 'shared_users', 'latest_received', 'latest_sent', 'latest_journal', 'latest_transactions',
-                                'top_assets',
+                                'top_assets', 'contracts',
                             ];
                             $summaryMeta = $meta
                                 ->reject(fn($value, $key) => in_array($key, $structuredKeys, true))
@@ -522,14 +564,14 @@
                         <button class="btn btn-link btn-block text-left text-reset p-3" type="button" data-toggle="collapse" data-target="#{{ $evidencePanelId }}" aria-expanded="false" aria-controls="{{ $evidencePanelId }}">
                             <div class="d-flex justify-content-between align-items-start flex-wrap">
                                 <div class="pr-3">
-                                    <span class="badge badge-{{ $categoryBadges[$evidence->category] ?? 'secondary' }}">{{ $categoryLabels[$evidence->category] ?? str_replace('_', ' ', ucfirst($evidence->category)) }}</span>
+                                    <span class="badge badge-{{ $scoreBadge($evidence->score, $categoryBadges[$evidence->category] ?? 'secondary') }}">{{ $categoryLabels[$evidence->category] ?? str_replace('_', ' ', ucfirst($evidence->category)) }}</span>
                                     <strong class="d-block mt-2">{{ $evidence->title }}</strong>
                                     @if($detailSummary)
                                         <span class="small text-muted d-block mt-1">{{ $detailSummary }}</span>
                                     @endif
                                 </div>
                                 <div class="text-right">
-                                    <span class="badge badge-light">{{ $evidence->score }} pts</span>
+                                    <span class="badge badge-{{ $scoreBadge($evidence->score, 'light') }}">{{ $evidence->score }} pts</span>
                                     @if($visibleContextCount > 0)
                                         <span class="badge badge-secondary">{{ $visibleContextCount }} context</span>
                                     @endif
@@ -561,6 +603,50 @@
                                 @endforeach
                             </div>
                         @endif
+                        @if(!empty(data_get($evidence->meta, 'freshness.rule')))
+                            <div class="alert alert-secondary py-2 mb-2">
+                                <strong>Freshness:</strong> {{ data_get($evidence->meta, 'freshness.rule') }}
+                                @if(data_get($evidence->meta, 'freshness.age_days') !== null)
+                                    <span class="text-muted">({{ number_format((int) data_get($evidence->meta, 'freshness.age_days')) }} days old)</span>
+                                @endif
+                            </div>
+                        @endif
+                        @if($evidence->category === 'risk_confidence')
+                            <div class="row mb-2">
+                                <div class="col-md-3 col-sm-6 mb-2">
+                                    <div class="border rounded px-2 py-1 h-100">
+                                        <small class="text-muted d-block">Confidence</small>
+                                        <span class="badge badge-{{ data_get($evidence->meta, 'badge', 'secondary') }}">{{ ucfirst(data_get($evidence->meta, 'level', 'unknown')) }}</span>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-sm-6 mb-2">
+                                    <div class="border rounded px-2 py-1 h-100">
+                                        <small class="text-muted d-block">ESI Coverage</small>
+                                        <strong>{{ data_get($evidence->meta, 'coverage_percent', 0) }}%</strong>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-sm-6 mb-2">
+                                    <div class="border rounded px-2 py-1 h-100">
+                                        <small class="text-muted d-block">Visible Rows</small>
+                                        <strong>{{ number_format((int) data_get($evidence->meta, 'visible_data_rows', 0)) }}</strong>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 col-sm-6 mb-2">
+                                    <div class="border rounded px-2 py-1 h-100">
+                                        <small class="text-muted d-block">Token Issues</small>
+                                        <strong>{{ number_format((int) data_get($evidence->meta, 'deleted_or_missing_token_count', 0)) }}</strong>
+                                    </div>
+                                </div>
+                            </div>
+                            @if(!empty(data_get($evidence->meta, 'missing_scope_groups')))
+                                <div class="mb-2">
+                                    <small class="text-muted d-block">Most common missing scope groups</small>
+                                    @foreach(data_get($evidence->meta, 'missing_scope_groups', []) as $group => $count)
+                                        <span class="badge badge-warning">{{ $group }} {{ $count }}</span>
+                                    @endforeach
+                                </div>
+                            @endif
+                        @endif
                         @if($evidence->category === 'vpn_ip' && !empty(data_get($evidence->meta, 'ips')))
                             <div class="table-responsive mb-2">
                                 <table class="table table-sm table-bordered mb-0">
@@ -576,7 +662,11 @@
                                     <tbody>
                                     @foreach(data_get($evidence->meta, 'ips', []) as $ipRecord)
                                         <tr>
-                                            <td><code>{{ data_get($ipRecord, 'ip') }}</code></td>
+                                            <td>
+                                                <a href="https://whatismyipaddress.com/ip/{{ urlencode(data_get($ipRecord, 'ip')) }}" target="_blank" rel="noopener noreferrer">
+                                                    <code>{{ data_get($ipRecord, 'ip') }}</code>
+                                                </a>
+                                            </td>
                                             <td>
                                                 @foreach(['vpn' => 'VPN', 'proxy' => 'Proxy', 'tor' => 'Tor', 'hosting' => 'Hosting'] as $flag => $label)
                                                     @if(data_get($ipRecord, $flag))
@@ -718,6 +808,14 @@
                             </div>
                         @endif
 	                        @if($evidence->category === 'hostile_contacts' && !empty(data_get($evidence->meta, 'contacts')))
+                                @if(!empty(data_get($evidence->meta, 'direction.standing_direction')))
+                                    <div class="alert alert-warning py-2 mb-2">
+                                        <strong>Direction:</strong> This is positive standing set by the character toward a hostile or monitored-negative entity.
+                                        @if(data_get($evidence->meta, 'direction.max_positive_standing') !== null)
+                                            Highest standing: {{ number_format((float) data_get($evidence->meta, 'direction.max_positive_standing'), 1) }}.
+                                        @endif
+                                    </div>
+                                @endif
 	                            <div class="table-responsive mb-2">
                                 <table class="table table-sm table-bordered mb-0">
                                     <thead>
@@ -726,6 +824,7 @@
                                         <th>Type</th>
                                         <th>Standing</th>
                                         <th>Flags</th>
+                                        <th>Interpretation</th>
                                     </tr>
                                     </thead>
                                     <tbody>
@@ -748,6 +847,7 @@
                                                     <span class="text-muted">None</span>
                                                 @endif
                                             </td>
+                                            <td class="small">{{ data_get($contact, 'interpretation') ?: 'Positive standing toward a hostile or monitored-negative entity.' }}</td>
                                         </tr>
                                     @endforeach
                                     </tbody>
@@ -1027,8 +1127,156 @@
                                 </table>
                             </div>
                         @endif
+                        @if($evidence->category === 'hostile_contract' && !empty(data_get($evidence->meta, 'contracts')))
+                            @if(data_get($evidence->meta, 'score_rule'))
+                                <div class="alert alert-warning py-2 mb-2">
+                                    <strong>Score rule:</strong> {{ data_get($evidence->meta, 'score_rule') }}
+                                </div>
+                            @endif
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead>
+                                    <tr>
+                                        <th>Contract</th>
+                                        <th>Character</th>
+                                        <th>Hostile Match</th>
+                                        <th>Parties</th>
+                                        <th>Value</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    @foreach(data_get($evidence->meta, 'contracts', []) as $contract)
+                                        @php
+                                            $matchedContractLabel = data_get($contract, 'matched_entity_type') ? str_replace('_', ' ', ucfirst(data_get($contract, 'matched_entity_type'))) . ' #' . data_get($contract, 'matched_entity_id') : 'Unknown';
+                                        @endphp
+                                        <tr>
+                                            <td>
+                                                #{{ data_get($contract, 'contract_id') }}
+                                                <div>{{ data_get($contract, 'title') ?: data_get($contract, 'type', 'Contract') }}</div>
+                                                <div class="small text-muted">{{ data_get($contract, 'status') ?: 'Unknown status' }} / {{ data_get($contract, 'date_issued') ?: 'Unknown date' }}</div>
+                                            </td>
+                                            <td>
+                                                {!! $characterLink(data_get($contract, 'character_id'), data_get($contract, 'character_name') ?: data_get($contract, 'character_id')) !!}
+                                            </td>
+                                            <td>
+                                                <span class="badge badge-danger">{{ $matchedContractLabel }}</span>
+                                                @if(data_get($contract, 'age_days') !== null)
+                                                    <div class="small text-muted">{{ number_format((int) data_get($contract, 'age_days')) }} days old</div>
+                                                @endif
+                                            </td>
+                                            <td class="small">
+                                                Issuer: {{ data_get($contract, 'issuer_name') ?: data_get($contract, 'issuer_id', 'Unknown') }}<br>
+                                                Issuer Corp: {{ data_get($contract, 'issuer_corporation_name') ?: data_get($contract, 'issuer_corporation_id', 'Unknown') }}<br>
+                                                Assignee: {{ data_get($contract, 'assignee_name') ?: data_get($contract, 'assignee_id', '-') }}<br>
+                                                Acceptor: {{ data_get($contract, 'acceptor_name') ?: data_get($contract, 'acceptor_id', '-') }}
+                                            </td>
+                                            <td class="small">
+                                                Price {{ number_format((float) data_get($contract, 'price', 0), 2) }} ISK<br>
+                                                Reward {{ number_format((float) data_get($contract, 'reward', 0), 2) }} ISK<br>
+                                                Collateral {{ number_format((float) data_get($contract, 'collateral', 0), 2) }} ISK
+                                            </td>
+                                        </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        @endif
+                        @if($evidence->category === 'hostile_killmail' && !empty(data_get($evidence->meta, 'matches')))
+                            <div class="mb-2">
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_side_count', 0) }} same-side</span>
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_side_count', 0) }} recent same-side</span>
+                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'opposed_count', 0) }} opposed</span>
+                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_opposed_count', 0) }} recent opposed</span>
+                                <span class="badge badge-secondary">{{ data_get($evidence->meta, 'total_count', 0) }} total</span>
+                            </div>
+                            @if(data_get($evidence->meta, 'score_rule'))
+                                <div class="alert alert-warning py-2 mb-2">
+                                    <strong>Score rule:</strong> {{ data_get($evidence->meta, 'score_rule') }}
+                                </div>
+                            @endif
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead>
+                                    <tr>
+                                        <th>Killmail</th>
+                                        <th>Relationship</th>
+                                        <th>Monitored Character</th>
+                                        <th>Hostile Entity</th>
+                                        <th>Ships</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    @foreach(data_get($evidence->meta, 'matches', []) as $killmail)
+                                        @php
+                                            $relationshipLabels = [
+                                                'same_side_attacker' => 'Same side attackers',
+                                                'hostile_attacker' => 'Hostile attacker',
+                                                'hostile_victim' => 'Hostile victim',
+                                            ];
+                                            $relationshipBadge = [
+                                                'same_side_attacker' => 'danger',
+                                                'hostile_attacker' => 'warning',
+                                                'hostile_victim' => 'warning',
+                                            ][data_get($killmail, 'relationship')] ?? 'secondary';
+                                            $hostileLabel = data_get($killmail, 'hostile_character_name')
+                                                ?: data_get($killmail, 'hostile_corporation_name')
+                                                ?: data_get($killmail, 'hostile_alliance_name')
+                                                ?: data_get($killmail, 'matched_entity_id')
+                                                ?: 'Unknown hostile';
+                                        @endphp
+                                        <tr>
+                                            <td>
+                                                #{{ data_get($killmail, 'killmail_id') }}
+                                                <div class="small text-muted">{{ data_get($killmail, 'killmail_time') ?: 'Unknown time' }}</div>
+                                                @if(data_get($killmail, 'recency_bucket'))
+                                                    <span class="badge badge-{{ data_get($killmail, 'recency_bucket') === 'recent' ? 'success' : 'secondary' }}">{{ ucfirst(data_get($killmail, 'recency_bucket')) }}</span>
+                                                @endif
+                                                @if(data_get($killmail, 'solar_system_name') || data_get($killmail, 'solar_system_id'))
+                                                    <div class="small text-muted">{{ data_get($killmail, 'solar_system_name') ?: data_get($killmail, 'solar_system_id') }}</div>
+                                                @endif
+                                            </td>
+                                            <td>
+                                                <span class="badge badge-{{ $relationshipBadge }}">{{ $relationshipLabels[data_get($killmail, 'relationship')] ?? data_get($killmail, 'relationship', 'Unknown') }}</span>
+                                                @if(data_get($killmail, 'final_blow'))
+                                                    <div class="small text-danger">Hostile final blow</div>
+                                                @endif
+                                                @if(data_get($killmail, 'damage_done') !== null)
+                                                    <div class="small text-muted">Damage {{ number_format((int) data_get($killmail, 'damage_done')) }}</div>
+                                                @endif
+                                            </td>
+                                            <td>
+                                                {!! $characterLink(data_get($killmail, 'monitored_character_id'), data_get($killmail, 'monitored_character_name') ?: data_get($killmail, 'monitored_character_id')) !!}
+                                                <div class="small text-muted">{{ ucfirst(data_get($killmail, 'monitored_side', 'unknown')) }}</div>
+                                            </td>
+                                            <td>
+                                                @if(data_get($killmail, 'hostile_character_id'))
+                                                    {!! $characterLink(data_get($killmail, 'hostile_character_id'), $hostileLabel) !!}
+                                                @else
+                                                    {{ $hostileLabel }}
+                                                @endif
+                                                <div class="small text-muted">
+                                                    @if(data_get($killmail, 'hostile_corporation_name') || data_get($killmail, 'hostile_corporation_id'))
+                                                        Corp: {{ data_get($killmail, 'hostile_corporation_name') ?: data_get($killmail, 'hostile_corporation_id') }}
+                                                    @endif
+                                                    @if(data_get($killmail, 'hostile_alliance_name') || data_get($killmail, 'hostile_alliance_id'))
+                                                        <br>Alliance: {{ data_get($killmail, 'hostile_alliance_name') ?: data_get($killmail, 'hostile_alliance_id') }}
+                                                    @endif
+                                                </div>
+                                            </td>
+                                            <td>
+                                                {{ data_get($killmail, 'monitored_ship_type_name') ?: data_get($killmail, 'monitored_ship_type_id', 'Unknown') }}
+                                                <span class="text-muted">/</span>
+                                                {{ data_get($killmail, 'hostile_ship_type_name') ?: data_get($killmail, 'hostile_ship_type_id', 'Unknown') }}
+                                            </td>
+                                        </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        @endif
                         @if($evidence->category === 'hostile_employment_overlap' && !empty(data_get($evidence->meta, 'matches')))
                             <div class="mb-2">
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'close_departure_count', 0) }} close departures</span>
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_time_count', 0) }} same-time</span>
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_time_count', 0) }} recent same-time</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_different_time_count', 0) }} recent same-corp</span>
@@ -1092,6 +1340,13 @@
                                                 @else
                                                     <span class="badge badge-warning">No same-time overlap</span>
                                                     <div class="small text-muted mt-1">They were in the same corporation at different times.</div>
+                                                @endif
+                                                @if(data_get($match, 'close_departure'))
+                                                    <div class="mt-1">
+                                                        <span class="badge badge-danger">
+                                                            Left within {{ data_get($match, 'departure_delta_days') }} day{{ (int) data_get($match, 'departure_delta_days') === 1 ? '' : 's' }}
+                                                        </span>
+                                                    </div>
                                                 @endif
                                             </td>
                                             <td>

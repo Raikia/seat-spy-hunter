@@ -189,22 +189,21 @@ class IpIntelligenceService
             ->whereIn('ip', $ips->all())
             ->pluck('ip')
             ->flip();
-        $queued = 0;
-
-        foreach ($ips as $ip) {
-            if ($cachedIps->has($ip) || $queuedIps->has($ip)) {
-                continue;
-            }
-
-            VpnLookupQueue::query()->create([
+        $now = now();
+        $rows = $ips
+            ->reject(fn ($ip) => $cachedIps->has($ip) || $queuedIps->has($ip))
+            ->map(fn ($ip) => [
                 'ip' => $ip,
                 'status' => 'pending',
-                'available_at' => now(),
-            ]);
-            $queued++;
-        }
+                'available_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ])
+            ->values();
 
-        return $queued;
+        return $rows
+            ->chunk(500)
+            ->sum(fn ($chunk) => VpnLookupQueue::query()->insertOrIgnore($chunk->all()));
     }
 
     private function isVpnApiEnabled(): bool

@@ -19,9 +19,9 @@ class IntelSettings
 
     const DEFAULT_LOW_SKILLPOINT_THRESHOLD = 5000000;
     const DEFAULT_NEW_CHARACTER_DAYS = 60;
-    const DEFAULT_SHARED_IP_SCORE = 20;
+    const DEFAULT_SHARED_IP_SCORE = 30;
     const DEFAULT_HOSTILE_INTERACTION_SCORE = 25;
-    const DEFAULT_VPN_SCORE = 30;
+    const DEFAULT_VPN_SCORE = 20;
 
     public function lowSkillpointThreshold(): int
     {
@@ -45,7 +45,7 @@ class IntelSettings
 
     public function sharedIpScore(): int
     {
-        return $this->integer(self::SHARED_IP_SCORE, self::DEFAULT_SHARED_IP_SCORE, 0);
+        return self::DEFAULT_SHARED_IP_SCORE;
     }
 
     public function setSharedIpScore(int $value): void
@@ -65,7 +65,7 @@ class IntelSettings
 
     public function vpnScore(): int
     {
-        return $this->integer(self::VPN_SCORE, self::DEFAULT_VPN_SCORE, 0);
+        return self::DEFAULT_VPN_SCORE;
     }
 
     public function setVpnScore(int $value): void

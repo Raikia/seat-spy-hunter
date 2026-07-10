@@ -83,16 +83,16 @@
                             <div class="form-group col-md-4">
                                 <label for="shared_ip_score">
                                     Shared IP
-                                    <i class="fas fa-info-circle text-muted ml-1" data-toggle="tooltip" title="Base score used when a SeAT user account shares public login IPs with other SeAT user accounts. More distinct shared users can increase the score."></i>
+                                    <i class="fas fa-info-circle text-muted ml-1" data-toggle="tooltip" title="Fixed score used when a SeAT user account shares public login IPs with other SeAT user accounts."></i>
                                 </label>
-                                <input type="number" name="shared_ip_score" id="shared_ip_score" class="form-control" min="0" max="100" value="{{ $settings->sharedIpScore() }}">
+                                <input type="number" name="shared_ip_score" id="shared_ip_score" class="form-control" min="0" max="100" value="{{ $settings->sharedIpScore() }}" readonly>
                             </div>
                             <div class="form-group col-md-4">
                                 <label for="vpn_score">
                                     VPN / Proxy
-                                    <i class="fas fa-info-circle text-muted ml-1" data-toggle="tooltip" title="Base score used when a public login IP is marked as VPN, proxy, Tor, hosting, Private Relay, or risk score 50+ in the IP intelligence cache."></i>
+                                    <i class="fas fa-info-circle text-muted ml-1" data-toggle="tooltip" title="Fixed score used when a public login IP is marked as VPN, proxy, Tor, hosting, Private Relay, or risk score 50+ in the IP intelligence cache."></i>
                                 </label>
-                                <input type="number" name="vpn_score" id="vpn_score" class="form-control" min="0" max="100" value="{{ $settings->vpnScore() }}">
+                                <input type="number" name="vpn_score" id="vpn_score" class="form-control" min="0" max="100" value="{{ $settings->vpnScore() }}" readonly>
                             </div>
                         </div>
                     </div>
@@ -106,7 +106,7 @@
                                 </label>
                             </div>
                             <div class="small text-muted mt-2">
-                                When enabled, a report refresh that finds new evidence after the last review moves the account back to Reviewing and clears the previous reviewed timestamp.
+                                When enabled, a report refresh that finds new evidence after a Cleared review moves the account back to Reviewing and clears the previous reviewed timestamp. Watchlisted, Concerned, Escalated, and Permanently Cleared accounts keep their manual status.
                             </div>
                         </div>
 
