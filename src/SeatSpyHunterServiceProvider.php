@@ -15,7 +15,7 @@ class SeatSpyHunterServiceProvider extends AbstractSeatPlugin
         $this->addRoutes();
         $this->addViews();
         $this->addTranslations();
-        $this->loadMigrationsFrom(__DIR__ . '/Database/migrations');
+        $this->loadMigrationsFrom(__DIR__ . '/database/migrations');
         $this->registerPermissions(__DIR__ . '/Config/seat-spy-hunter.permissions.php', 'seat-spy-hunter');
         $this->registerCommands();
     }
