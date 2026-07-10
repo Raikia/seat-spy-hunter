@@ -1109,6 +1109,8 @@ class IntelReportRefresher
 
         $hostileIds = $hostileEntityIds->map(fn ($id) => (int) $id)->filter()->unique()->values();
         $hasKillmailDetails = Schema::hasTable('killmail_details');
+        $monitoredJoinDates = $this->monitoredGroupJoinDates($characterIds);
+        $accountMonitoredJoinDate = $monitoredJoinDates->filter()->sort()->first();
 
         $monitoredVictims = DB::table('killmail_victims as monitored')
             ->join('killmail_attackers as hostile', 'hostile.killmail_id', '=', 'monitored.killmail_id')
@@ -1136,7 +1138,15 @@ class IntelReportRefresher
                     ->orWhereNull('hostile.character_id');
             })
             ->select($this->killmailEvidenceSelects('monitored', 'hostile', $hasKillmailDetails, 'attacker', 'same_side_attacker', true))
-            ->get();
+            ->get()
+            ->filter(function ($row) use ($accountMonitoredJoinDate) {
+                if (!$accountMonitoredJoinDate || !$row->killmail_time) {
+                    return false;
+                }
+
+                return strtotime((string) $row->killmail_time) < strtotime((string) $accountMonitoredJoinDate);
+            })
+            ->values();
 
         $matches = $monitoredVictims
             ->merge($monitoredAttackers)
@@ -1176,15 +1186,17 @@ class IntelReportRefresher
         $evidence->push([
             'category' => 'hostile_killmail',
             'score' => $score,
-            'title' => $sameSideCount > 0 ? 'Killmails on the same side as hostile entities' : 'Killmails involving hostile entities',
+            'title' => $sameSideCount > 0 ? 'Pre-join killmails on the same side as hostile entities' : 'Killmails involving hostile entities',
             'details' => sprintf('%s has linked account characters appearing on %d killmail%s with configured hostile or monitored-negative entities%s.',
                 $user->name,
                 $matches->count(),
                 $matches->count() === 1 ? '' : 's',
-                $sameSideCount > 0 ? ', including same-side attacker participation' : ''
+                $sameSideCount > 0 ? ', including same-side attacker participation before joining a monitored group' : ''
             ),
             'meta' => [
                 'same_side_count' => $sameSideCount,
+                'same_side_scope' => 'Only same-side attacker killmails before the linked account first joined a monitored corporation/alliance are counted.',
+                'account_monitored_group_joined_at' => $this->dateString($accountMonitoredJoinDate),
                 'recent_same_side_count' => $recentSameSideCount,
                 'old_same_side_count' => $oldSameSideCount,
                 'opposed_count' => $opposedCount,
@@ -1194,14 +1206,18 @@ class IntelReportRefresher
                 'matches' => $matches
                     ->sortByDesc(fn ($row) => $row->killmail_time ?: $row->killmail_id)
                     ->take(20)
-                    ->map(function ($row) use ($hostileIds, $characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames) {
+                    ->map(function ($row) use ($hostileIds, $characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames, $monitoredJoinDates, $accountMonitoredJoinDate) {
                         $matchedEntity = $this->matchedHostileKillmailEntity($row, $hostileIds);
+                        $monitoredJoinDate = $monitoredJoinDates->get((int) $row->monitored_character_id);
 
                         return [
                             'killmail_id' => (int) $row->killmail_id,
                             'killmail_time' => $this->dateString($row->killmail_time),
                             'age_days' => $this->ageDays($row->killmail_time),
                             'recency_bucket' => $this->ageDays($row->killmail_time) === null ? 'unknown' : ($this->ageDays($row->killmail_time) <= 730 ? 'recent' : 'old'),
+                            'monitored_group_joined_at' => $this->dateString($monitoredJoinDate),
+                            'account_monitored_group_joined_at' => $this->dateString($accountMonitoredJoinDate),
+                            'same_side_pre_join' => $row->relationship === 'same_side_attacker',
                             'solar_system_id' => $row->solar_system_id ? (int) $row->solar_system_id : null,
                             'solar_system_name' => $row->solar_system_id ? $systemNames->get((int) $row->solar_system_id) : null,
                             'relationship' => $row->relationship,
@@ -1252,11 +1268,11 @@ class IntelReportRefresher
     private function hostileKillmailScoreRule(int $recentSameSideCount, int $oldSameSideCount, int $recentOpposedCount): string
     {
         if ($recentSameSideCount > 0) {
-            return 'Same-side hostile killmail activity in the last two years is treated as high-signal evidence.';
+            return 'Same-side hostile killmail activity before joining the monitored group, in the last two years, is treated as high-signal evidence.';
         }
 
         if ($oldSameSideCount > 0) {
-            return 'Same-side hostile killmail activity older than two years is still shown but down-weighted.';
+            return 'Same-side hostile killmail activity before joining the monitored group and older than two years is still shown but down-weighted.';
         }
 
         if ($recentOpposedCount > 0) {
@@ -1902,6 +1918,30 @@ class IntelReportRefresher
             ->filter()
             ->unique()
             ->values();
+    }
+
+    private function monitoredGroupJoinDates($characterIds)
+    {
+        $characterIds = collect($characterIds)->map(fn ($id) => (int) $id)->filter()->unique()->values();
+        $monitoredCorporationIds = $this->monitoredCorporationIds();
+
+        if ($characterIds->isEmpty()
+            || $monitoredCorporationIds->isEmpty()
+            || !Schema::hasTable('character_corporation_histories')
+            || !Schema::hasColumn('character_corporation_histories', 'character_id')
+            || !Schema::hasColumn('character_corporation_histories', 'corporation_id')
+            || !Schema::hasColumn('character_corporation_histories', 'start_date')) {
+            return collect();
+        }
+
+        return DB::table('character_corporation_histories')
+            ->whereIn('character_id', $characterIds->all())
+            ->whereIn('corporation_id', $monitoredCorporationIds->all())
+            ->when(Schema::hasColumn('character_corporation_histories', 'is_deleted'), fn ($query) => $query->where('is_deleted', false))
+            ->whereNotNull('start_date')
+            ->groupBy('character_id')
+            ->selectRaw('character_id, min(start_date) as joined_at')
+            ->pluck('joined_at', 'character_id');
     }
 
     private function corporationId(CharacterInfo $character): ?int

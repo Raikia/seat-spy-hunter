@@ -1183,12 +1183,17 @@
                         @endif
                         @if($evidence->category === 'hostile_killmail' && !empty(data_get($evidence->meta, 'matches')))
                             <div class="mb-2">
-                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_side_count', 0) }} same-side</span>
-                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_side_count', 0) }} recent same-side</span>
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_side_count', 0) }} pre-join same-side</span>
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_side_count', 0) }} recent pre-join same-side</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'opposed_count', 0) }} opposed</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_opposed_count', 0) }} recent opposed</span>
                                 <span class="badge badge-secondary">{{ data_get($evidence->meta, 'total_count', 0) }} total</span>
                             </div>
+                            @if(data_get($evidence->meta, 'same_side_scope'))
+                                <div class="alert alert-info py-2 mb-2">
+                                    {{ data_get($evidence->meta, 'same_side_scope') }}
+                                </div>
+                            @endif
                             @if(data_get($evidence->meta, 'score_rule'))
                                 <div class="alert alert-warning py-2 mb-2">
                                     <strong>Score rule:</strong> {{ data_get($evidence->meta, 'score_rule') }}
@@ -1209,7 +1214,7 @@
                                     @foreach(data_get($evidence->meta, 'matches', []) as $killmail)
                                         @php
                                             $relationshipLabels = [
-                                                'same_side_attacker' => 'Same side attackers',
+                                                'same_side_attacker' => 'Pre-join same side',
                                                 'hostile_attacker' => 'Hostile attacker',
                                                 'hostile_victim' => 'Hostile victim',
                                             ];
@@ -1247,6 +1252,11 @@
                                             <td>
                                                 {!! $characterLink(data_get($killmail, 'monitored_character_id'), data_get($killmail, 'monitored_character_name') ?: data_get($killmail, 'monitored_character_id')) !!}
                                                 <div class="small text-muted">{{ ucfirst(data_get($killmail, 'monitored_side', 'unknown')) }}</div>
+                                                @if(data_get($killmail, 'monitored_group_joined_at'))
+                                                    <div class="small text-muted">Joined monitored group {{ data_get($killmail, 'monitored_group_joined_at') }}</div>
+                                                @elseif(data_get($killmail, 'account_monitored_group_joined_at'))
+                                                    <div class="small text-muted">Account joined monitored group {{ data_get($killmail, 'account_monitored_group_joined_at') }}</div>
+                                                @endif
                                             </td>
                                             <td>
                                                 @if(data_get($killmail, 'hostile_character_id'))
