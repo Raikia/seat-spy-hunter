@@ -65,6 +65,57 @@
             <div class="alert alert-info">
                 Queue Login IPs scans SeAT login history and adds uncached public IPs to the pending queue. Run VPN Queue dispatches the background worker that processes those pending lookups through VPNAPI.io. Cached IP results are kept indefinitely, and rate limits pause processing until the next UTC day.
             </div>
+            <div class="row mb-3">
+                <div class="col-md-2 col-6 mb-2">
+                    <div class="border rounded p-2 h-100">
+                        <small class="text-muted d-block">VPNAPI.io</small>
+                        @if($loginIpQueueStats['configured'])
+                            <span class="badge badge-success">Configured</span>
+                        @else
+                            <span class="badge badge-danger">Not configured</span>
+                        @endif
+                    </div>
+                </div>
+                <div class="col-md-2 col-6 mb-2">
+                    <div class="border rounded p-2 h-100">
+                        <small class="text-muted d-block">Distinct Login IPs</small>
+                        <strong>{{ number_format($loginIpQueueStats['total']) }}</strong>
+                    </div>
+                </div>
+                <div class="col-md-2 col-6 mb-2">
+                    <div class="border rounded p-2 h-100">
+                        <small class="text-muted d-block">Public</small>
+                        <strong>{{ number_format($loginIpQueueStats['public']) }}</strong>
+                    </div>
+                </div>
+                <div class="col-md-2 col-6 mb-2">
+                    <div class="border rounded p-2 h-100">
+                        <small class="text-muted d-block">Private / Reserved</small>
+                        <strong>{{ number_format($loginIpQueueStats['private_or_reserved']) }}</strong>
+                    </div>
+                </div>
+                <div class="col-md-2 col-6 mb-2">
+                    <div class="border rounded p-2 h-100">
+                        <small class="text-muted d-block">Cached / Queued</small>
+                        <strong>{{ number_format($loginIpQueueStats['cached']) }} / {{ number_format($loginIpQueueStats['queued']) }}</strong>
+                    </div>
+                </div>
+                <div class="col-md-2 col-6 mb-2">
+                    <div class="border rounded p-2 h-100">
+                        <small class="text-muted d-block">Queueable Now</small>
+                        <strong>{{ number_format($loginIpQueueStats['queueable']) }}</strong>
+                    </div>
+                </div>
+            </div>
+            @if(!$loginIpQueueStats['has_login_history_table'])
+                <div class="alert alert-warning">
+                    SeAT's <code>user_login_histories</code> table was not found, so Spy Hunter cannot discover login IPs to queue.
+                </div>
+            @elseif($loginIpQueueStats['public'] === 0 && $loginIpQueueStats['total'] > 0)
+                <div class="alert alert-warning">
+                    Spy Hunter found login history, but none of the distinct login IPs are public routable IPs. Private, reserved, localhost, and Docker/internal addresses are skipped because VPNAPI.io cannot classify them usefully.
+                </div>
+            @endif
             <form method="GET" action="{{ route('seat-spy-hunter.caches') }}" class="form-row align-items-end mb-3">
                 <div class="form-group col-md-9">
                     <label for="ip_search">Search IP Cache</label>

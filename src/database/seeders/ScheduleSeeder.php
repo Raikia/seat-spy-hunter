@@ -11,7 +11,7 @@ class ScheduleSeeder extends AbstractScheduleSeeder
         return [
             [
                 'command' => 'seat-spy-hunter:refresh',
-                'expression' => '17 */2 * * *',
+                'expression' => '17 3 * * *',
                 'allow_overlap' => false,
                 'allow_maintenance' => false,
                 'ping_before' => null,

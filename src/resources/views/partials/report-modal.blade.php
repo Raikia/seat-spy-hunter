@@ -1030,11 +1030,18 @@
                         @if($evidence->category === 'hostile_employment_overlap' && !empty(data_get($evidence->meta, 'matches')))
                             <div class="mb-2">
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_time_count', 0) }} same-time</span>
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_time_count', 0) }} recent same-time</span>
+                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_different_time_count', 0) }} recent same-corp</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'different_time_count', 0) }} historical-only</span>
                                 <span class="badge badge-info">{{ data_get($evidence->meta, 'recent_count', 0) }} last 2 years</span>
                                 <span class="badge badge-primary">{{ data_get($evidence->meta, 'aging_count', 0) }} 2-5 years old</span>
                                 <span class="badge badge-secondary">{{ data_get($evidence->meta, 'old_count', 0) }} older than 5 years</span>
                             </div>
+                            @if(data_get($evidence->meta, 'score_rule'))
+                                <div class="alert alert-secondary py-2 mb-2">
+                                    <strong>Score rule:</strong> {{ data_get($evidence->meta, 'score_rule') }}
+                                </div>
+                            @endif
                             <div class="table-responsive mb-2">
                                 <table class="table table-sm table-bordered mb-0">
                                     <thead>
@@ -1091,11 +1098,17 @@
                                                 {{ data_get($match, 'local_start_date') ?: 'Unknown' }}
                                                 -
                                                 {{ data_get($match, 'local_end_date') ?: 'Current/Unknown' }}
+                                                @if(data_get($match, 'local_recent'))
+                                                    <div><span class="badge badge-info">Monitored recent</span></div>
+                                                @endif
                                             </td>
                                             <td>
                                                 {{ data_get($match, 'hostile_start_date') ?: 'Unknown' }}
                                                 -
                                                 {{ data_get($match, 'hostile_end_date') ?: 'Current/Unknown' }}
+                                                @if(data_get($match, 'hostile_recent'))
+                                                    <div><span class="badge badge-warning">Hostile recent</span></div>
+                                                @endif
                                             </td>
                                             <td>
                                                 @php

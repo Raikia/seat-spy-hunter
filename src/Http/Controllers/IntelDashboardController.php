@@ -62,17 +62,19 @@ class IntelDashboardController extends Controller
                     $inner->orWhere('user_id', $search);
                 });
             })
+            ->orderByRaw("case when review_status = 'watchlisted' then 0 else 1 end")
             ->orderByDesc('score')
             ->orderBy('character_name')
             ->get();
 
         $lastAnalyzedAt = CharacterIntelReport::query()->max('last_analyzed_at');
+        $activeReports = CharacterIntelReport::query()
+            ->whereNotIn('review_status', ['cleared', 'permanently_cleared']);
         $summary = [
             'total' => CharacterIntelReport::query()->count(),
-            'critical' => CharacterIntelReport::query()->where('rating', 'critical')->count(),
-            'high' => CharacterIntelReport::query()->where('rating', 'high')->count(),
-            'watch' => CharacterIntelReport::query()->where('rating', 'watch')->count(),
-            'clear' => CharacterIntelReport::query()->where('rating', 'clear')->count(),
+            'critical' => (clone $activeReports)->where('rating', 'critical')->count(),
+            'high' => (clone $activeReports)->where('rating', 'high')->count(),
+            'watchlisted' => CharacterIntelReport::query()->where('review_status', 'watchlisted')->count(),
             'last_analyzed_at' => $lastAnalyzedAt ? Carbon::parse($lastAnalyzedAt)->toDateTimeString() : null,
         ];
 

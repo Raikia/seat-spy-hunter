@@ -114,6 +114,57 @@ class IpIntelligenceService
         return $this->queuePublicIps($ips);
     }
 
+    public function loginIpQueueStats(): array
+    {
+        if (!Schema::hasTable('user_login_histories')) {
+            return [
+                'configured' => $this->isVpnApiConfigured(),
+                'has_login_history_table' => false,
+                'total' => 0,
+                'valid' => 0,
+                'public' => 0,
+                'private_or_reserved' => 0,
+                'invalid' => 0,
+                'cached' => 0,
+                'queued' => 0,
+                'queueable' => 0,
+            ];
+        }
+
+        $ips = DB::table('user_login_histories')
+            ->whereNotNull('source')
+            ->where('source', '<>', '')
+            ->select('source')
+            ->groupBy('source')
+            ->orderBy('source')
+            ->pluck('source')
+            ->map(fn ($ip) => trim((string) $ip))
+            ->filter()
+            ->unique()
+            ->values();
+        $validIps = $ips->filter(fn ($ip) => filter_var($ip, FILTER_VALIDATE_IP) !== false)->values();
+        $publicIps = $validIps->filter(fn ($ip) => $this->isPublicIp($ip))->values();
+        $cachedIps = $publicIps->isEmpty()
+            ? collect()
+            : IpIntelligence::query()->whereIn('ip', $publicIps->all())->pluck('ip')->flip();
+        $queuedIps = $publicIps->isEmpty()
+            ? collect()
+            : VpnLookupQueue::query()->whereIn('ip', $publicIps->all())->pluck('ip')->flip();
+
+        return [
+            'configured' => $this->isVpnApiConfigured(),
+            'has_login_history_table' => true,
+            'total' => $ips->count(),
+            'valid' => $validIps->count(),
+            'public' => $publicIps->count(),
+            'private_or_reserved' => $validIps->count() - $publicIps->count(),
+            'invalid' => $ips->count() - $validIps->count(),
+            'cached' => $cachedIps->count(),
+            'queued' => $queuedIps->count(),
+            'queueable' => $publicIps->reject(fn ($ip) => $cachedIps->has($ip) || $queuedIps->has($ip))->count(),
+        ];
+    }
+
     public function queuePublicIps(Collection $ips): int
     {
         if (!$this->isVpnApiConfigured()) {
@@ -164,7 +215,9 @@ class IpIntelligenceService
 
     private function isVpnApiConfigured(): bool
     {
-        return in_array(strtolower((string) $this->settings->ipProvider()), ['vpnapi', 'vpnapi.io'], true)
+        $provider = strtolower((string) ($this->settings->ipProvider() ?: 'vpnapi.io'));
+
+        return in_array($provider, ['vpnapi', 'vpnapi.io'], true)
             && filled($this->settings->ipProviderKey());
     }
 

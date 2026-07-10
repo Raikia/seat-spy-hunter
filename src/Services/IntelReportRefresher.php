@@ -171,7 +171,7 @@ class IntelReportRefresher
             ];
         }
 
-        if ($hasNewEvidence && $this->settings->reopenReviewOnNewEvidence() && in_array($previousReview->review_status, ['cleared', 'watchlisted'], true)) {
+        if ($hasNewEvidence && $this->settings->reopenReviewOnNewEvidence() && $previousReview->review_status === 'cleared') {
             return [
                 'review_status' => 'reviewing',
                 'review_notes' => $previousReview->review_notes,
@@ -822,17 +822,9 @@ class IntelReportRefresher
         $aging = $overlaps->where('overlap_age_bucket', 'aging');
         $old = $overlaps->where('overlap_age_bucket', 'old');
         $unknownAge = $overlaps->where('overlap_age_bucket', 'unknown');
-        $score = min(45,
-            ($recent->where('same_time', true)->count() * 12)
-            + ($recent->where('same_time', false)->count() * 7)
-            + ($aging->where('same_time', true)->count() * 6)
-            + ($aging->where('same_time', false)->count() * 3)
-            + ($old->where('same_time', true)->count() * 2)
-            + ($old->where('same_time', false)->count() * 1)
-            + ($unknownAge->where('same_time', true)->count() * 4)
-            + ($unknownAge->where('same_time', false)->count() * 2)
-        );
-        $score = max($sameTime->isNotEmpty() ? 4 : 2, $score);
+        $recentSameTime = $overlaps->filter(fn ($match) => data_get($match, 'same_time') && data_get($match, 'overlap_age_bucket') === 'recent');
+        $recentDifferentTime = $overlaps->filter(fn ($match) => !data_get($match, 'same_time') && data_get($match, 'both_recent'));
+        $score = $this->employmentOverlapScore($overlaps, $recentSameTime, $recentDifferentTime);
 
         $evidence->push([
             'category' => 'hostile_employment_overlap',
@@ -845,14 +837,47 @@ class IntelReportRefresher
             'meta' => [
                 'same_time_count' => $sameTime->count(),
                 'different_time_count' => $overlaps->count() - $sameTime->count(),
+                'recent_same_time_count' => $recentSameTime->count(),
+                'recent_different_time_count' => $recentDifferentTime->count(),
                 'recent_count' => $recent->count(),
                 'aging_count' => $aging->count(),
                 'old_count' => $old->count(),
                 'unknown_age_count' => $unknownAge->count(),
                 'recency_window_days' => 730,
+                'score_rule' => $this->employmentOverlapScoreRule($score),
                 'matches' => $overlaps->take(20)->values()->all(),
             ],
         ]);
+    }
+
+    private function employmentOverlapScore($overlaps, $recentSameTime, $recentDifferentTime): int
+    {
+        if ($recentSameTime->isNotEmpty()) {
+            return 45;
+        }
+
+        if ($recentDifferentTime->isNotEmpty()) {
+            return 25;
+        }
+
+        if ($overlaps->where('same_time', true)->isNotEmpty()) {
+            return 10;
+        }
+
+        return min(10, max(2, $overlaps->count()));
+    }
+
+    private function employmentOverlapScoreRule(int $score): string
+    {
+        if ($score === 45) {
+            return 'Same-corporation employment overlapped in the last two years.';
+        }
+
+        if ($score === 25) {
+            return 'No same-time overlap, but both characters were in the same corporation during the last two years.';
+        }
+
+        return 'Historical overlap only; monitored character was not in that corporation during the last two years, so this is capped at low severity.';
     }
 
     private function addFootprintEvidence(User $user, $characters, $characterIds, $hostileEntityIds, $evidence): void

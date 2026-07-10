@@ -18,7 +18,7 @@ use Seat\Web\Http\Controllers\Controller;
 
 class IntelCacheController extends Controller
 {
-    public function index(Request $request)
+    public function index(Request $request, IpIntelligenceService $ipIntelligence)
     {
         $ipSearch = $request->get('ip_search');
         $eveWhoSearch = $request->get('evewho_search');
@@ -58,8 +58,9 @@ class IntelCacheController extends Controller
             'vpn_pending' => VpnLookupQueue::query()->where('status', 'pending')->count(),
             'evewho_pending' => EveWhoQueue::query()->where('status', 'pending')->count(),
         ];
+        $loginIpQueueStats = $ipIntelligence->loginIpQueueStats();
 
-        return view('seat-spy-hunter::caches', compact('ipRecords', 'eveWhoMembers', 'eveWhoMemberAffiliations', 'sourceEntityNames', 'summary', 'ipSearch', 'eveWhoSearch'));
+        return view('seat-spy-hunter::caches', compact('ipRecords', 'eveWhoMembers', 'eveWhoMemberAffiliations', 'sourceEntityNames', 'summary', 'loginIpQueueStats', 'ipSearch', 'eveWhoSearch'));
     }
 
     public function destroyIp(IpIntelligence $record)
@@ -89,8 +90,26 @@ class IntelCacheController extends Controller
     public function queueLoginIps(IpIntelligenceService $ipIntelligence)
     {
         $queued = $ipIntelligence->queueKnownLoginIps(null);
+        $stats = $ipIntelligence->loginIpQueueStats();
 
-        return redirect()->route('seat-spy-hunter.caches')->with('success', sprintf('Queued %d uncached public login IP%s for VPNAPI.io lookup.', $queued, $queued === 1 ? '' : 's'));
+        if (!$stats['configured']) {
+            return redirect()->route('seat-spy-hunter.caches')->with('warning', 'No login IPs were queued because VPNAPI.io is not configured. Add a provider key in Spy Hunter settings.');
+        }
+
+        if (!$stats['has_login_history_table']) {
+            return redirect()->route('seat-spy-hunter.caches')->with('warning', 'No login IPs were queued because the SeAT login history table was not found.');
+        }
+
+        return redirect()->route('seat-spy-hunter.caches')->with('success', sprintf(
+            'Queued %d uncached public login IP%s for VPNAPI.io lookup. Login IPs: %d public, %d private/reserved, %d cached, %d already queued, %d still queueable.',
+            $queued,
+            $queued === 1 ? '' : 's',
+            $stats['public'],
+            $stats['private_or_reserved'],
+            $stats['cached'],
+            $stats['queued'],
+            $stats['queueable']
+        ));
     }
 
     public function destroyEveWhoMember(EveWhoMember $member)

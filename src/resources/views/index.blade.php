@@ -34,37 +34,31 @@
             </div>
 
             <div class="row mt-4">
-                <div class="col-md-2 col-6 mb-3">
+                <div class="col-md col-6 mb-3">
                     <div class="border rounded p-3 h-100">
                         <small class="text-muted d-block">Total</small>
                         <strong class="h4 mb-0">{{ $summary['total'] }}</strong>
                     </div>
                 </div>
-                <div class="col-md-2 col-6 mb-3">
+                <div class="col-md col-6 mb-3">
+                    <div class="border rounded p-3 h-100">
+                        <small class="text-muted d-block">Watchlisted</small>
+                        <strong class="h4 mb-0 text-warning">{{ $summary['watchlisted'] }}</strong>
+                    </div>
+                </div>
+                <div class="col-md col-6 mb-3">
                     <div class="border rounded p-3 h-100">
                         <small class="text-muted d-block">Critical</small>
                         <strong class="h4 mb-0 text-danger">{{ $summary['critical'] }}</strong>
                     </div>
                 </div>
-                <div class="col-md-2 col-6 mb-3">
+                <div class="col-md col-6 mb-3">
                     <div class="border rounded p-3 h-100">
                         <small class="text-muted d-block">High</small>
                         <strong class="h4 mb-0 text-warning">{{ $summary['high'] }}</strong>
                     </div>
                 </div>
-                <div class="col-md-2 col-6 mb-3">
-                    <div class="border rounded p-3 h-100">
-                        <small class="text-muted d-block">Watch</small>
-                        <strong class="h4 mb-0 text-info">{{ $summary['watch'] }}</strong>
-                    </div>
-                </div>
-                <div class="col-md-2 col-6 mb-3">
-                    <div class="border rounded p-3 h-100">
-                        <small class="text-muted d-block">Clear</small>
-                        <strong class="h4 mb-0 text-success">{{ $summary['clear'] }}</strong>
-                    </div>
-                </div>
-                <div class="col-md-2 col-6 mb-3">
+                <div class="col-md col-6 mb-3">
                     <div class="border rounded p-3 h-100">
                         <small class="text-muted d-block">Updated</small>
                         <strong class="small">{{ $summary['last_analyzed_at'] ?: 'Never' }}</strong>
@@ -218,7 +212,7 @@
                                 {{ $report->corporation_name ?: $report->corporation_id }}<br>
                                 <small class="text-muted">{{ $report->alliance_name ?: ($report->alliance_id ?: 'No alliance') }}</small>
                             </td>
-                            <td data-order="{{ $report->score }}">
+                            <td data-order="{{ ($report->review_status === 'watchlisted' ? 100000 : 0) + $report->score }}">
                                 @php
                                     $badge = data_get(['critical' => 'danger', 'high' => 'warning', 'watch' => 'info', 'clear' => 'success'], $report->rating, 'secondary');
                                 @endphp

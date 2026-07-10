@@ -201,6 +201,8 @@ class EveWhoService
                     $lastRelevantDate = $this->overlapLastRelevantDate($local->start_date, $local->end_date, $hostile->start_date, $hostile->end_date, $sameTime);
                     $overlapWindow = $this->overlapWindow($local->start_date, $local->end_date, $hostile->start_date, $hostile->end_date, $sameTime);
                     $ageDays = $lastRelevantDate ? now()->diffInDays($lastRelevantDate) : null;
+                    $localRecent = $this->employmentTouchesRecentWindow($local->start_date, $local->end_date);
+                    $hostileRecent = $this->employmentTouchesRecentWindow($hostile->start_date, $hostile->end_date);
                     $corporation = $corporationDetails->get((int) $local->corporation_id, []);
                     $allianceId = data_get($corporation, 'alliance_id');
 
@@ -218,6 +220,9 @@ class EveWhoService
                         'local_end_date' => $this->dateOnlyString($local->end_date),
                         'hostile_start_date' => $this->dateOnlyString($hostile->start_date),
                         'hostile_end_date' => $this->dateOnlyString($hostile->end_date),
+                        'local_recent' => $localRecent,
+                        'hostile_recent' => $hostileRecent,
+                        'both_recent' => $localRecent && $hostileRecent,
                         'overlap_start_date' => $this->dateOnlyString(data_get($overlapWindow, 'start')),
                         'overlap_end_date' => $this->dateOnlyString(data_get($overlapWindow, 'end')),
                         'overlap_last_seen_date' => $this->dateOnlyString($lastRelevantDate),
@@ -398,6 +403,15 @@ class EveWhoService
         }
 
         return 'old';
+    }
+
+    private function employmentTouchesRecentWindow($startDate, $endDate, int $days = 730): bool
+    {
+        $windowStart = now()->subDays($days)->startOfDay();
+        $start = $startDate ? \Carbon\Carbon::parse($startDate)->startOfDay() : null;
+        $end = $endDate ? \Carbon\Carbon::parse($endDate)->endOfDay() : now()->endOfDay();
+
+        return $end->gte($windowStart) && (!$start || $start->lte(now()));
     }
 
     private function monitoredCorporationIds(): Collection
