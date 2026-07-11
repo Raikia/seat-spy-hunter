@@ -12,7 +12,7 @@
         'limited_recent_wallet_activity' => 'Low Wallet Activity',
         'stable_wallet_balance' => 'Stable Wallet',
         'hostile_corporation_history' => 'Hostile Corp History',
-        'recent_neutral_corporation_history' => 'Recent Neutral Corp',
+        'recent_neutral_corporation_history' => 'Recent Outside Corp',
         'corporation_history_churn' => 'Corp Churn',
         'quiet_corporation_history' => 'Quiet Corp History',
         'thin_seat_footprint' => 'Thin Footprint',
@@ -24,12 +24,15 @@
         'low_assets' => 'Low Assets',
         'low_asset_value' => 'Low Asset Value',
         'hostile_asset_location' => 'Hostile Asset Location',
+        'post_leave_hostile_join' => 'Post-Leave Hostile Join',
         'hostile_employment_overlap' => 'Hostile Employment Overlap',
         'hostile_mail' => 'Hostile Mail',
         'hostile_wallet' => 'Hostile Wallet',
         'hostile_wallet_direct' => 'Direct Wallet',
         'hostile_market_transaction' => 'Market Trade',
-        'hostile_killmail' => 'Hostile Killmail',
+        'hostile_killmail' => 'Pre-Join Kills vs Monitored',
+        'prejoin_killmail_cluster' => 'Pre-Join Killmail Cluster',
+        'prejoin_monitored_lossmail' => 'Pre-Join Monitored Loss',
         'hostile_contract' => 'Hostile Contract',
         'risk_confidence' => 'Risk Confidence',
         'new_evidence_since_review' => 'New Evidence',
@@ -69,12 +72,15 @@
         'low_assets' => 'info',
         'low_asset_value' => 'warning',
         'hostile_asset_location' => 'warning',
+        'post_leave_hostile_join' => 'danger',
         'hostile_employment_overlap' => 'danger',
         'hostile_mail' => 'danger',
         'hostile_wallet' => 'danger',
         'hostile_wallet_direct' => 'danger',
         'hostile_market_transaction' => 'warning',
         'hostile_killmail' => 'danger',
+        'prejoin_killmail_cluster' => 'warning',
+        'prejoin_monitored_lossmail' => 'info',
         'hostile_contract' => 'danger',
         'risk_confidence' => 'primary',
         'new_evidence_since_review' => 'primary',
@@ -100,6 +106,48 @@
 
         return '<a href="' . route('seatcore::character.view.sheet', ['character' => $characterId]) . '" target="_blank" rel="noopener noreferrer">' . e($label ?: $characterId) . '</a>';
     };
+    $employmentOverlapCorporationIds = $report->evidence
+        ->where('category', 'hostile_employment_overlap')
+        ->flatMap(fn($row) => collect(data_get($row->meta, 'matches', []))->pluck('corporation_id'))
+        ->filter()
+        ->map(fn($id) => (int) $id)
+        ->unique()
+        ->values();
+    $employmentOverlapCorporationNames = collect();
+
+    if ($employmentOverlapCorporationIds->isNotEmpty()) {
+        if (\Illuminate\Support\Facades\Schema::hasTable('corporation_infos')) {
+            $employmentOverlapCorporationNames = $employmentOverlapCorporationNames->union(
+                \Illuminate\Support\Facades\DB::table('corporation_infos')
+                    ->whereIn('corporation_id', $employmentOverlapCorporationIds->all())
+                    ->pluck('name', 'corporation_id')
+            );
+        }
+
+        $missingEmploymentCorporationIds = $employmentOverlapCorporationIds
+            ->reject(fn($id) => $employmentOverlapCorporationNames->has((int) $id))
+            ->values();
+
+        if ($missingEmploymentCorporationIds->isNotEmpty() && \Illuminate\Support\Facades\Schema::hasTable('universe_names')) {
+            $employmentOverlapCorporationNames = $employmentOverlapCorporationNames->union(
+                \Illuminate\Support\Facades\DB::table('universe_names')
+                    ->whereIn('entity_id', $missingEmploymentCorporationIds->all())
+                    ->pluck('name', 'entity_id')
+            );
+        }
+
+        $missingEmploymentCorporationIds = $employmentOverlapCorporationIds
+            ->reject(fn($id) => $employmentOverlapCorporationNames->has((int) $id))
+            ->values();
+
+        if ($missingEmploymentCorporationIds->isNotEmpty() && \Illuminate\Support\Facades\Schema::hasTable('invNames')) {
+            $employmentOverlapCorporationNames = $employmentOverlapCorporationNames->union(
+                \Illuminate\Support\Facades\DB::table('invNames')
+                    ->whereIn('itemID', $missingEmploymentCorporationIds->all())
+                    ->pluck('itemName', 'itemID')
+            );
+        }
+    }
     $scoreBadge = function ($score, $fallback = 'secondary') {
         $score = (int) $score;
 
@@ -938,9 +986,70 @@
                                     <tbody>
                                     @foreach(data_get($evidence->meta, 'matches', []) as $history)
                                         <tr>
-                                            <td>{!! $characterLink(data_get($history, 'character_id'), data_get($history, 'character_id')) !!}</td>
-                                            <td>{{ data_get($history, 'corporation_id') }}</td>
+                                            <td>
+                                                {!! $characterLink(data_get($history, 'character_id'), data_get($history, 'character_name') ?: data_get($history, 'character_id')) !!}
+                                                <div class="small text-muted">{{ data_get($history, 'character_id') }}</div>
+                                            </td>
+                                            <td>
+                                                {{ data_get($history, 'corporation_name') ?: data_get($history, 'corporation_id') }}
+                                                <div class="small text-muted">{{ data_get($history, 'corporation_id') }}</div>
+                                            </td>
                                             <td>{{ data_get($history, 'start_date') ?: 'Unknown' }}</td>
+                                        </tr>
+                                    @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                        @endif
+                        @if($evidence->category === 'post_leave_hostile_join' && !empty(data_get($evidence->meta, 'matches')))
+                            @if(data_get($evidence->meta, 'score_rule'))
+                                <div class="alert alert-warning py-2 mb-2">
+                                    <strong>Score rule:</strong> {{ data_get($evidence->meta, 'score_rule') }}
+                                </div>
+                            @endif
+                            <div class="mb-2">
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'total_count', 0) }} post-leave hostile joins</span>
+                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'fast_move_count', 0) }} within 7 days</span>
+                                <span class="badge badge-secondary">{{ data_get($evidence->meta, 'window_days', 30) }} day window</span>
+                            </div>
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead>
+                                    <tr>
+                                        <th>Character</th>
+                                        <th>Left Monitored Corp</th>
+                                        <th>Joined Hostile Corp</th>
+                                        <th>Gap</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    @foreach(data_get($evidence->meta, 'matches', []) as $move)
+                                        <tr>
+                                            <td>
+                                                {!! $characterLink(data_get($move, 'character_id'), data_get($move, 'character_name') ?: data_get($move, 'character_id')) !!}
+                                                <div class="small text-muted">{{ data_get($move, 'character_id') }}</div>
+                                            </td>
+                                            <td>
+                                                {{ data_get($move, 'monitored_corporation_name') ?: data_get($move, 'monitored_corporation_id') }}
+                                                <div class="small text-muted">
+                                                    {{ data_get($move, 'monitored_corporation_id') }}
+                                                    / {{ data_get($move, 'monitored_start_date') ?: 'Unknown' }}
+                                                    -
+                                                    {{ data_get($move, 'monitored_left_at') ?: 'Unknown' }}
+                                                </div>
+                                            </td>
+                                            <td>
+                                                {{ data_get($move, 'hostile_corporation_name') ?: data_get($move, 'hostile_corporation_id') }}
+                                                <div class="small text-muted">
+                                                    {{ data_get($move, 'hostile_corporation_id') }}
+                                                    / joined {{ data_get($move, 'hostile_joined_at') ?: 'Unknown' }}
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <span class="badge badge-{{ (int) data_get($move, 'days_to_hostile', 999) <= 7 ? 'danger' : 'warning' }}">
+                                                    {{ data_get($move, 'days_to_hostile') }} day{{ (int) data_get($move, 'days_to_hostile') === 1 ? '' : 's' }}
+                                                </span>
+                                            </td>
                                         </tr>
                                     @endforeach
                                     </tbody>
@@ -1181,17 +1290,105 @@
                                 </table>
                             </div>
                         @endif
-                        @if($evidence->category === 'hostile_killmail' && !empty(data_get($evidence->meta, 'matches')))
+                        @if($evidence->category === 'prejoin_killmail_cluster' && !empty(data_get($evidence->meta, 'clusters')))
+                            @if(data_get($evidence->meta, 'score_rule'))
+                                <div class="alert alert-warning py-2 mb-2">
+                                    <strong>Score rule:</strong> {{ data_get($evidence->meta, 'score_rule') }}
+                                </div>
+                            @endif
                             <div class="mb-2">
-                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_side_count', 0) }} pre-join same-side</span>
-                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_side_count', 0) }} recent pre-join same-side</span>
-                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'opposed_count', 0) }} opposed</span>
-                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_opposed_count', 0) }} recent opposed</span>
+                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'cluster_count', 0) }} repeated group{{ (int) data_get($evidence->meta, 'cluster_count', 0) === 1 ? '' : 's' }}</span>
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'hostile_cluster_count', 0) }} hostile cluster{{ (int) data_get($evidence->meta, 'hostile_cluster_count', 0) === 1 ? '' : 's' }}</span>
+                            </div>
+                            <div id="spy-hunter-killmail-cluster-{{ $evidence->id }}" class="accordion mb-2">
+                                @foreach(data_get($evidence->meta, 'clusters', []) as $clusterIndex => $cluster)
+                                    @php
+                                        $clusterPanelId = 'spy-hunter-killmail-cluster-' . $evidence->id . '-' . $clusterIndex;
+                                    @endphp
+                                    <div class="border rounded mb-2">
+                                        <button class="btn btn-link btn-block text-left text-reset p-2" type="button" data-toggle="collapse" data-target="#{{ $clusterPanelId }}" aria-expanded="{{ $clusterIndex === 0 ? 'true' : 'false' }}" aria-controls="{{ $clusterPanelId }}">
+                                            <span class="badge badge-{{ data_get($cluster, 'hostile') ? 'danger' : 'warning' }}">{{ data_get($cluster, 'hostile') ? 'Hostile' : 'Outside group' }}</span>
+                                            <strong>{{ data_get($cluster, 'entity_name') ?: (ucfirst(data_get($cluster, 'entity_type', 'entity')) . ' #' . data_get($cluster, 'entity_id')) }}</strong>
+                                            <span class="text-muted">
+                                                {{ data_get($cluster, 'killmail_count') }} killmails /
+                                                {{ data_get($cluster, 'active_day_count') }} day{{ (int) data_get($cluster, 'active_day_count') === 1 ? '' : 's' }}
+                                            </span>
+                                        </button>
+                                        <div id="{{ $clusterPanelId }}" class="collapse {{ $clusterIndex === 0 ? 'show' : '' }}" data-parent="#spy-hunter-killmail-cluster-{{ $evidence->id }}">
+                                            <div class="p-2">
+                                                <div class="mb-2">
+                                                    <span class="badge badge-light">First {{ data_get($cluster, 'first_seen_at') ?: 'Unknown' }}</span>
+                                                    <span class="badge badge-light">Last {{ data_get($cluster, 'last_seen_at') ?: 'Unknown' }}</span>
+                                                    <span class="badge badge-info">{{ data_get($cluster, 'recent_killmail_count', 0) }} recent</span>
+                                                </div>
+                                                <div class="table-responsive">
+                                                    <table class="table table-sm table-bordered mb-0">
+                                                        <thead>
+                                                        <tr>
+                                                            <th>Killmail</th>
+                                                            <th>Account Character</th>
+                                                            <th>Same-Side Pilot</th>
+                                                            <th>Ships</th>
+                                                        </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                        @foreach(data_get($cluster, 'killmails', []) as $killmail)
+                                                            <tr>
+                                                                <td>
+                                                                    #{{ data_get($killmail, 'killmail_id') }}
+                                                                    <div class="small text-muted">{{ data_get($killmail, 'killmail_time') ?: 'Unknown time' }}</div>
+                                                                    @if(data_get($killmail, 'solar_system_name') || data_get($killmail, 'solar_system_id'))
+                                                                        <div class="small text-muted">{{ data_get($killmail, 'solar_system_name') ?: data_get($killmail, 'solar_system_id') }}</div>
+                                                                    @endif
+                                                                </td>
+                                                                <td>
+                                                                    {!! $characterLink(data_get($killmail, 'monitored_character_id'), data_get($killmail, 'monitored_character_name') ?: data_get($killmail, 'monitored_character_id')) !!}
+                                                                    <div class="small text-muted">Joined {{ data_get($killmail, 'monitored_group_joined_at') ?: 'Unknown' }}</div>
+                                                                </td>
+                                                                <td>
+                                                                    @if(data_get($killmail, 'other_character_id'))
+                                                                        {!! $characterLink(data_get($killmail, 'other_character_id'), data_get($killmail, 'other_character_name') ?: data_get($killmail, 'other_character_id')) !!}
+                                                                    @else
+                                                                        {{ data_get($killmail, 'other_corporation_name') ?: data_get($killmail, 'other_alliance_name') ?: 'Unknown pilot' }}
+                                                                    @endif
+                                                                    <div class="small text-muted">
+                                                                        @if(data_get($killmail, 'other_corporation_name') || data_get($killmail, 'other_corporation_id'))
+                                                                            Corp: {{ data_get($killmail, 'other_corporation_name') ?: data_get($killmail, 'other_corporation_id') }}
+                                                                        @endif
+                                                                        @if(data_get($killmail, 'other_alliance_name') || data_get($killmail, 'other_alliance_id'))
+                                                                            <br>Alliance: {{ data_get($killmail, 'other_alliance_name') ?: data_get($killmail, 'other_alliance_id') }}
+                                                                        @endif
+                                                                    </div>
+                                                                </td>
+                                                                <td>
+                                                                    {{ data_get($killmail, 'monitored_ship_type_name') ?: data_get($killmail, 'monitored_ship_type_id', 'Unknown') }}
+                                                                    <span class="text-muted">/</span>
+                                                                    {{ data_get($killmail, 'other_ship_type_name') ?: data_get($killmail, 'other_ship_type_id', 'Unknown') }}
+                                                                </td>
+                                                            </tr>
+                                                        @endforeach
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                @endforeach
+                            </div>
+                        @endif
+                        @if(in_array($evidence->category, ['hostile_killmail', 'prejoin_monitored_lossmail']) && !empty(data_get($evidence->meta, 'matches')))
+                            <div class="mb-2">
+                                @if($evidence->category === 'prejoin_monitored_lossmail')
+                                    <span class="badge badge-info">{{ data_get($evidence->meta, 'total_count', 0) }} pre-join monitored losses</span>
+                                @else
+                                    <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_count', data_get($evidence->meta, 'recent_same_side_count', 0)) }} recent pre-join kills</span>
+                                    <span class="badge badge-warning">{{ data_get($evidence->meta, 'old_count', data_get($evidence->meta, 'old_same_side_count', 0)) }} older pre-join kills</span>
+                                @endif
                                 <span class="badge badge-secondary">{{ data_get($evidence->meta, 'total_count', 0) }} total</span>
                             </div>
-                            @if(data_get($evidence->meta, 'same_side_scope'))
+                            @if(data_get($evidence->meta, 'scope') || data_get($evidence->meta, 'same_side_scope'))
                                 <div class="alert alert-info py-2 mb-2">
-                                    {{ data_get($evidence->meta, 'same_side_scope') }}
+                                    {{ data_get($evidence->meta, 'scope') ?: data_get($evidence->meta, 'same_side_scope') }}
                                 </div>
                             @endif
                             @if(data_get($evidence->meta, 'score_rule'))
@@ -1206,7 +1403,7 @@
                                         <th>Killmail</th>
                                         <th>Relationship</th>
                                         <th>Monitored Character</th>
-                                        <th>Hostile Entity</th>
+                                        <th>{{ $evidence->category === 'hostile_killmail' ? 'Monitored Group Victim' : 'Other Party' }}</th>
                                         <th>Ships</th>
                                     </tr>
                                     </thead>
@@ -1215,19 +1412,21 @@
                                         @php
                                             $relationshipLabels = [
                                                 'same_side_attacker' => 'Pre-join same side',
-                                                'hostile_attacker' => 'Hostile attacker',
                                                 'hostile_victim' => 'Hostile victim',
+                                                'monitored_group_victim' => 'Killed monitored group',
+                                                'monitored_group_attacker' => 'Killed by monitored group',
                                             ];
                                             $relationshipBadge = [
                                                 'same_side_attacker' => 'danger',
-                                                'hostile_attacker' => 'warning',
                                                 'hostile_victim' => 'warning',
+                                                'monitored_group_victim' => 'danger',
+                                                'monitored_group_attacker' => 'info',
                                             ][data_get($killmail, 'relationship')] ?? 'secondary';
                                             $hostileLabel = data_get($killmail, 'hostile_character_name')
                                                 ?: data_get($killmail, 'hostile_corporation_name')
                                                 ?: data_get($killmail, 'hostile_alliance_name')
                                                 ?: data_get($killmail, 'matched_entity_id')
-                                                ?: 'Unknown hostile';
+                                                ?: ($evidence->category === 'hostile_killmail' ? 'Unknown monitored group' : 'Unknown hostile');
                                         @endphp
                                         <tr>
                                             <td>
@@ -1243,7 +1442,7 @@
                                             <td>
                                                 <span class="badge badge-{{ $relationshipBadge }}">{{ $relationshipLabels[data_get($killmail, 'relationship')] ?? data_get($killmail, 'relationship', 'Unknown') }}</span>
                                                 @if(data_get($killmail, 'final_blow'))
-                                                    <div class="small text-danger">Hostile final blow</div>
+                                                    <div class="small text-danger">{{ $evidence->category === 'prejoin_monitored_lossmail' ? 'Monitored group final blow' : 'Hostile final blow' }}</div>
                                                 @endif
                                                 @if(data_get($killmail, 'damage_done') !== null)
                                                     <div class="small text-muted">Damage {{ number_format((int) data_get($killmail, 'damage_done')) }}</div>
@@ -1253,7 +1452,12 @@
                                                 {!! $characterLink(data_get($killmail, 'monitored_character_id'), data_get($killmail, 'monitored_character_name') ?: data_get($killmail, 'monitored_character_id')) !!}
                                                 <div class="small text-muted">{{ ucfirst(data_get($killmail, 'monitored_side', 'unknown')) }}</div>
                                                 @if(data_get($killmail, 'monitored_group_joined_at'))
-                                                    <div class="small text-muted">Joined monitored group {{ data_get($killmail, 'monitored_group_joined_at') }}</div>
+                                                    <div class="small text-muted">
+                                                        Joined monitored group {{ data_get($killmail, 'monitored_group_joined_at') }}
+                                                        @if(data_get($killmail, 'monitored_group_joined_at_source') === 'account')
+                                                            <span class="text-muted">(account)</span>
+                                                        @endif
+                                                    </div>
                                                 @elseif(data_get($killmail, 'account_monitored_group_joined_at'))
                                                     <div class="small text-muted">Account joined monitored group {{ data_get($killmail, 'account_monitored_group_joined_at') }}</div>
                                                 @endif
@@ -1291,7 +1495,7 @@
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_time_count', 0) }} recent same-time</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_different_time_count', 0) }} recent same-corp</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'different_time_count', 0) }} historical-only</span>
-                                <span class="badge badge-info">{{ data_get($evidence->meta, 'recent_count', 0) }} last 2 years</span>
+                                <span class="badge badge-info">{{ data_get($evidence->meta, 'recent_count', 0) }} monitored last 2 years</span>
                                 <span class="badge badge-primary">{{ data_get($evidence->meta, 'aging_count', 0) }} 2-5 years old</span>
                                 <span class="badge badge-secondary">{{ data_get($evidence->meta, 'old_count', 0) }} older than 5 years</span>
                             </div>
@@ -1331,7 +1535,7 @@
                                                 </div>
                                             </td>
                                             <td>
-                                                {{ data_get($match, 'corporation_name') ?: data_get($match, 'corporation_id') }}
+                                                {{ data_get($match, 'corporation_name') ?: $employmentOverlapCorporationNames->get((int) data_get($match, 'corporation_id')) ?: data_get($match, 'corporation_id') }}
                                                 <div class="small text-muted">{{ data_get($match, 'corporation_id') }}</div>
                                                 @if(data_get($match, 'alliance_name') || data_get($match, 'alliance_id'))
                                                     <div class="small text-muted">

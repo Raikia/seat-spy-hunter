@@ -10,6 +10,11 @@ Route::group([
         'uses' => 'IntelDashboardController@index',
     ]);
 
+    Route::get('/help', [
+        'as' => 'seat-spy-hunter.help',
+        'uses' => 'IntelDashboardController@help',
+    ]);
+
     Route::get('/characters/{report}', [
         'as' => 'seat-spy-hunter.characters.show',
         'uses' => 'IntelDashboardController@show',

@@ -5,6 +5,7 @@ namespace Raikia\SeatSpyHunter\Services;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Raikia\SeatSpyHunter\Models\CharacterIntelReport;
+use Raikia\SeatSpyHunter\Models\EveWhoMember;
 use Raikia\SeatSpyHunter\Models\FalsePositiveSuppression;
 use Raikia\SeatSpyHunter\Models\IntelEntity;
 use Raikia\SeatSpyHunter\Models\IpIntelligence;
@@ -17,6 +18,8 @@ use Seat\Web\Models\User;
 
 class IntelReportRefresher
 {
+    private const PLAYER_CORPORATION_ID_FLOOR = 90000000;
+
     private $analyzer;
     private $hostileContacts;
     private $eveWho;
@@ -587,8 +590,11 @@ class IntelReportRefresher
         }
 
         $this->addCorporationHistoryEvidence($user, $characterIds, $hostileEntityIds, $evidence);
+        $this->addPostLeaveHostileJoinEvidence($user, $characterIds, $evidence);
         $this->addEmploymentOverlapEvidence($user, $characterIds, $evidence);
         $this->addHostileKillmailEvidence($user, $characterIds, $hostileEntityIds, $evidence);
+        $this->addPreJoinKillmailClusterEvidence($user, $characterIds, $evidence);
+        $this->addPreJoinMonitoredLossmailEvidence($user, $characterIds, $evidence);
         $this->addHostileContractEvidence($user, $characterIds, $hostileEntityIds, $evidence);
         $this->addLowAssetValueEvidence($user, $characterIds, $evidence);
         $this->addFootprintEvidence($user, $characters, $characterIds, $hostileEntityIds, $evidence);
@@ -918,11 +924,15 @@ class IntelReportRefresher
             ->whereIn('character_id', $characterIds->all())
             ->where('is_deleted', false)
             ->orderByDesc('start_date')
-            ->get(['character_id', 'corporation_id', 'start_date']);
+            ->get(['character_id', 'corporation_id', 'start_date'])
+            ->filter(fn ($row) => $this->isPlayerCorporationId((int) $row->corporation_id))
+            ->values();
 
         $hostileCorpIds = $hostileEntityIds->map(fn ($id) => (int) $id)->flip();
         $hostileHistories = $histories->filter(fn ($row) => $hostileCorpIds->has((int) $row->corporation_id));
         $monitoredCorpIds = $this->monitoredCorporationIds()->flip();
+        $historyCharacterNames = $this->characterNames($histories->pluck('character_id')->filter()->unique()->values());
+        $historyCorporationNames = $this->corporationNames($histories->pluck('corporation_id')->filter()->unique()->values());
 
         if ($hostileHistories->isNotEmpty()) {
             $evidence->push([
@@ -933,7 +943,9 @@ class IntelReportRefresher
                 'meta' => [
                     'matches' => $hostileHistories->take(10)->map(fn ($row) => [
                         'character_id' => (int) $row->character_id,
+                        'character_name' => $historyCharacterNames->get((int) $row->character_id),
                         'corporation_id' => (int) $row->corporation_id,
+                        'corporation_name' => $historyCorporationNames->get((int) $row->corporation_id),
                         'start_date' => $this->dateString($row->start_date),
                     ])->values()->all(),
                 ],
@@ -950,12 +962,14 @@ class IntelReportRefresher
             $evidence->push([
                 'category' => 'recent_neutral_corporation_history',
                 'score' => min(16, 8 + (($recentUnmonitoredHistories->count() - 1) * 2)),
-                'title' => 'Recent non-monitored corporation history',
+                'title' => 'Recent outside corporation history',
                 'details' => sprintf('%s has recent corporation-history entries outside monitored corporations and known monitored-alliance member corporations.', $user->name),
                 'meta' => [
                     'matches' => $recentUnmonitoredHistories->take(10)->map(fn ($row) => [
                         'character_id' => (int) $row->character_id,
+                        'character_name' => $historyCharacterNames->get((int) $row->character_id),
                         'corporation_id' => (int) $row->corporation_id,
+                        'corporation_name' => $historyCorporationNames->get((int) $row->corporation_id),
                         'start_date' => $this->dateString($row->start_date),
                     ])->values()->all(),
                     'window_days' => 180,
@@ -1015,6 +1029,131 @@ class IntelReportRefresher
         }
     }
 
+    private function addPostLeaveHostileJoinEvidence(User $user, $characterIds, $evidence): void
+    {
+        if ($characterIds->isEmpty()
+            || !Schema::hasTable('character_corporation_histories')
+            || !Schema::hasColumn('character_corporation_histories', 'character_id')
+            || !Schema::hasColumn('character_corporation_histories', 'corporation_id')
+            || !Schema::hasColumn('character_corporation_histories', 'start_date')) {
+            return;
+        }
+
+        $monitoredCorporationIds = $this->monitoredCorporationIds()->flip();
+        $hostileCorporationIds = $this->hostileCorporationIds()->flip();
+
+        if ($monitoredCorporationIds->isEmpty() || $hostileCorporationIds->isEmpty()) {
+            return;
+        }
+
+        $rows = DB::table('character_corporation_histories')
+            ->whereIn('character_id', $characterIds->all())
+            ->when(Schema::hasColumn('character_corporation_histories', 'is_deleted'), fn ($query) => $query->where('is_deleted', false))
+            ->whereNotNull('start_date')
+            ->orderBy('character_id')
+            ->orderBy('start_date')
+            ->get(['character_id', 'corporation_id', 'start_date'])
+            ->filter(fn ($row) => $this->isPlayerCorporationId((int) $row->corporation_id))
+            ->values();
+
+        if ($rows->isEmpty()) {
+            return;
+        }
+
+        $matches = $rows
+            ->groupBy('character_id')
+            ->flatMap(function ($histories) use ($monitoredCorporationIds, $hostileCorporationIds) {
+                $histories = $histories->values();
+                $matches = collect();
+
+                foreach ($histories as $index => $history) {
+                    if (!$monitoredCorporationIds->has((int) $history->corporation_id)) {
+                        continue;
+                    }
+
+                    $leftAt = optional($histories->get($index + 1))->start_date;
+
+                    if (!$leftAt) {
+                        continue;
+                    }
+
+                    $hostileJoin = $histories
+                        ->slice($index + 1)
+                        ->first(function ($later) use ($leftAt, $hostileCorporationIds) {
+                            if (!$hostileCorporationIds->has((int) $later->corporation_id)) {
+                                return false;
+                            }
+
+                            $days = \Illuminate\Support\Carbon::parse($leftAt)->startOfDay()
+                                ->diffInDays(\Illuminate\Support\Carbon::parse($later->start_date)->startOfDay(), false);
+
+                            return $days >= 0 && $days <= 30;
+                        });
+
+                    if (!$hostileJoin) {
+                        continue;
+                    }
+
+                    $daysToHostile = \Illuminate\Support\Carbon::parse($leftAt)->startOfDay()
+                        ->diffInDays(\Illuminate\Support\Carbon::parse($hostileJoin->start_date)->startOfDay(), false);
+
+                    $matches->push([
+                        'character_id' => (int) $history->character_id,
+                        'monitored_corporation_id' => (int) $history->corporation_id,
+                        'monitored_start_date' => $this->dateString($history->start_date),
+                        'monitored_left_at' => $this->dateString($leftAt),
+                        'hostile_corporation_id' => (int) $hostileJoin->corporation_id,
+                        'hostile_joined_at' => $this->dateString($hostileJoin->start_date),
+                        'days_to_hostile' => $daysToHostile,
+                    ]);
+                }
+
+                return $matches;
+            })
+            ->sortBy('days_to_hostile')
+            ->values();
+
+        if ($matches->isEmpty()) {
+            return;
+        }
+
+        $characterNames = $this->characterNames($matches->pluck('character_id'));
+        $corporationNames = $this->corporationNames($matches
+            ->pluck('monitored_corporation_id')
+            ->merge($matches->pluck('hostile_corporation_id')));
+        $fastMoves = $matches->where('days_to_hostile', '<=', 7)->count();
+        $score = $fastMoves > 0 ? min(55, 35 + ($fastMoves * 5)) : min(35, 25 + ($matches->count() * 3));
+
+        $evidence->push([
+            'category' => 'post_leave_hostile_join',
+            'score' => $score,
+            'title' => 'Joined hostile group after leaving monitored group',
+            'details' => sprintf('%s has linked account characters that joined a hostile corporation within 30 days after leaving a monitored corporation.', $user->name),
+            'meta' => [
+                'total_count' => $matches->count(),
+                'fast_move_count' => $fastMoves,
+                'window_days' => 30,
+                'score_rule' => $fastMoves > 0
+                    ? 'Moves into a hostile group within 7 days are scored more heavily.'
+                    : 'Moves into a hostile group within 30 days are scored as medium-high context.',
+                'matches' => $matches->take(20)->map(function ($match) use ($characterNames, $corporationNames) {
+                    return [
+                        'character_id' => data_get($match, 'character_id'),
+                        'character_name' => $characterNames->get((int) data_get($match, 'character_id')),
+                        'monitored_corporation_id' => data_get($match, 'monitored_corporation_id'),
+                        'monitored_corporation_name' => $corporationNames->get((int) data_get($match, 'monitored_corporation_id')),
+                        'monitored_start_date' => data_get($match, 'monitored_start_date'),
+                        'monitored_left_at' => data_get($match, 'monitored_left_at'),
+                        'hostile_corporation_id' => data_get($match, 'hostile_corporation_id'),
+                        'hostile_corporation_name' => $corporationNames->get((int) data_get($match, 'hostile_corporation_id')),
+                        'hostile_joined_at' => data_get($match, 'hostile_joined_at'),
+                        'days_to_hostile' => data_get($match, 'days_to_hostile'),
+                    ];
+                })->values()->all(),
+            ],
+        ]);
+    }
+
     private function addEmploymentOverlapEvidence(User $user, $characterIds, $evidence): void
     {
         $overlaps = $this->eveWho->hostileEmploymentOverlaps($characterIds);
@@ -1037,8 +1176,9 @@ class IntelReportRefresher
             'category' => 'hostile_employment_overlap',
             'score' => $score,
             'title' => $sameTime->isNotEmpty() ? 'Employment overlap with hostile characters' : 'Historical corporation overlap with hostile characters',
-            'details' => sprintf('%s has employment history overlapping SeAT ESI histories for characters currently cached from hostile EveWho groups%s.',
+            'details' => sprintf('%s has %s SeAT ESI histories for characters currently cached from hostile EveWho groups%s.',
                 $user->name,
+                $sameTime->isNotEmpty() ? 'same-time employment overlap with' : 'shared historical corporation membership with',
                 $sameTime->isNotEmpty() ? ', including same-time corporation membership' : ''
             ),
             'meta' => [
@@ -1099,58 +1239,52 @@ class IntelReportRefresher
     private function addHostileKillmailEvidence(User $user, $characterIds, $hostileEntityIds, $evidence): void
     {
         if ($characterIds->isEmpty()
-            || $hostileEntityIds->isEmpty()
             || !Schema::hasTable('killmail_attackers')
             || !Schema::hasTable('killmail_victims')
+            || !Schema::hasTable('killmail_details')
             || !Schema::hasColumn('killmail_attackers', 'character_id')
-            || !Schema::hasColumn('killmail_victims', 'character_id')) {
+            || !Schema::hasColumn('killmail_victims', 'character_id')
+            || !Schema::hasColumn('killmail_details', 'killmail_time')) {
             return;
         }
 
-        $hostileIds = $hostileEntityIds->map(fn ($id) => (int) $id)->filter()->unique()->values();
-        $hasKillmailDetails = Schema::hasTable('killmail_details');
         $monitoredJoinDates = $this->monitoredGroupJoinDates($characterIds);
         $accountMonitoredJoinDate = $monitoredJoinDates->filter()->sort()->first();
 
-        $monitoredVictims = DB::table('killmail_victims as monitored')
-            ->join('killmail_attackers as hostile', 'hostile.killmail_id', '=', 'monitored.killmail_id')
-            ->when($hasKillmailDetails, fn ($query) => $query->leftJoin('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id'))
-            ->whereIn('monitored.character_id', $characterIds->all())
-            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'hostile', $hostileIds))
-            ->select($this->killmailEvidenceSelects('monitored', 'hostile', $hasKillmailDetails, 'victim', 'hostile_attacker', true))
-            ->get();
+        if (!$accountMonitoredJoinDate) {
+            return;
+        }
 
-        $monitoredAttackers = DB::table('killmail_attackers as monitored')
-            ->join('killmail_victims as hostile', 'hostile.killmail_id', '=', 'monitored.killmail_id')
-            ->when($hasKillmailDetails, fn ($query) => $query->leftJoin('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id'))
-            ->whereIn('monitored.character_id', $characterIds->all())
-            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'hostile', $hostileIds))
-            ->select($this->killmailEvidenceSelects('monitored', 'hostile', $hasKillmailDetails, 'attacker', 'hostile_victim', false))
-            ->get();
+        $monitoredEntityIds = $this->monitoredKillmailEntityIds();
 
-        $sameSideAttackers = DB::table('killmail_attackers as monitored')
-            ->join('killmail_attackers as hostile', 'hostile.killmail_id', '=', 'monitored.killmail_id')
-            ->when($hasKillmailDetails, fn ($query) => $query->leftJoin('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id'))
+        if ($monitoredEntityIds->isEmpty()) {
+            return;
+        }
+
+        $matches = DB::table('killmail_attackers as monitored')
+            ->join('killmail_victims as target', 'target.killmail_id', '=', 'monitored.killmail_id')
+            ->join('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id')
             ->whereIn('monitored.character_id', $characterIds->all())
-            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'hostile', $hostileIds))
+            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'target', $monitoredEntityIds))
             ->where(function ($query) {
-                $query->whereColumn('hostile.character_id', '!=', 'monitored.character_id')
-                    ->orWhereNull('hostile.character_id');
+                $query->whereColumn('target.character_id', '!=', 'monitored.character_id')
+                    ->orWhereNull('target.character_id');
             })
-            ->select($this->killmailEvidenceSelects('monitored', 'hostile', $hasKillmailDetails, 'attacker', 'same_side_attacker', true))
+            ->select($this->killmailEvidenceSelects('monitored', 'target', true, 'attacker', 'monitored_group_victim', false))
             ->get()
-            ->filter(function ($row) use ($accountMonitoredJoinDate) {
-                if (!$accountMonitoredJoinDate || !$row->killmail_time) {
+            ->filter(function ($row) use ($monitoredJoinDates, $accountMonitoredJoinDate) {
+                if (!$row->killmail_time) {
                     return false;
                 }
 
-                return strtotime((string) $row->killmail_time) < strtotime((string) $accountMonitoredJoinDate);
-            })
-            ->values();
+                $joinDate = $monitoredJoinDates->get((int) $row->monitored_character_id) ?: $accountMonitoredJoinDate;
 
-        $matches = $monitoredVictims
-            ->merge($monitoredAttackers)
-            ->merge($sameSideAttackers)
+                if (!$joinDate) {
+                    return false;
+                }
+
+                return strtotime((string) $row->killmail_time) < strtotime((string) $joinDate);
+            })
             ->unique(fn ($row) => implode(':', [
                 $row->killmail_id,
                 $row->relationship,
@@ -1170,54 +1304,44 @@ class IntelReportRefresher
         $allianceNames = $this->allianceNames($matches->pluck('hostile_alliance_id')->filter()->unique()->values());
         $shipNames = $this->typeNames($matches->pluck('monitored_ship_type_id')->merge($matches->pluck('hostile_ship_type_id')));
         $systemNames = $this->solarSystemNames($matches->pluck('solar_system_id'));
-        $sameSideCount = $matches->where('relationship', 'same_side_attacker')->count();
-        $opposedCount = $matches->count() - $sameSideCount;
-        $recentSameSideCount = $matches
-            ->where('relationship', 'same_side_attacker')
+        $recentCount = $matches
             ->filter(fn ($row) => $this->ageDays($row->killmail_time) !== null && $this->ageDays($row->killmail_time) <= 730)
             ->count();
-        $oldSameSideCount = $sameSideCount - $recentSameSideCount;
-        $recentOpposedCount = $matches
-            ->reject(fn ($row) => $row->relationship === 'same_side_attacker')
-            ->filter(fn ($row) => $this->ageDays($row->killmail_time) !== null && $this->ageDays($row->killmail_time) <= 730)
-            ->count();
-        $score = $this->hostileKillmailScore($recentSameSideCount, $oldSameSideCount, $recentOpposedCount, $opposedCount - $recentOpposedCount);
+        $oldCount = $matches->count() - $recentCount;
+        $score = $this->hostileKillmailScore($recentCount, $oldCount);
 
         $evidence->push([
             'category' => 'hostile_killmail',
             'score' => $score,
-            'title' => $sameSideCount > 0 ? 'Pre-join killmails on the same side as hostile entities' : 'Killmails involving hostile entities',
-            'details' => sprintf('%s has linked account characters appearing on %d killmail%s with configured hostile or monitored-negative entities%s.',
+            'title' => 'Pre-join killmails against monitored groups',
+            'details' => sprintf('%s has linked account characters appearing as attackers on %d killmail%s where the victim belonged to a monitored group, before that character or account joined a monitored group.',
                 $user->name,
                 $matches->count(),
-                $matches->count() === 1 ? '' : 's',
-                $sameSideCount > 0 ? ', including same-side attacker participation before joining a monitored group' : ''
+                $matches->count() === 1 ? '' : 's'
             ),
             'meta' => [
-                'same_side_count' => $sameSideCount,
-                'same_side_scope' => 'Only same-side attacker killmails before the linked account first joined a monitored corporation/alliance are counted.',
+                'scope' => 'Only attacker killmails against monitored-group victims before the character joined a monitored group are counted. For linked alts that never joined directly, the account first monitored-group join date is used.',
                 'account_monitored_group_joined_at' => $this->dateString($accountMonitoredJoinDate),
-                'recent_same_side_count' => $recentSameSideCount,
-                'old_same_side_count' => $oldSameSideCount,
-                'opposed_count' => $opposedCount,
-                'recent_opposed_count' => $recentOpposedCount,
+                'recent_count' => $recentCount,
+                'old_count' => $oldCount,
                 'total_count' => $matches->count(),
-                'score_rule' => $this->hostileKillmailScoreRule($recentSameSideCount, $oldSameSideCount, $recentOpposedCount),
+                'score_rule' => $this->hostileKillmailScoreRule($recentCount, $oldCount),
                 'matches' => $matches
                     ->sortByDesc(fn ($row) => $row->killmail_time ?: $row->killmail_id)
                     ->take(20)
-                    ->map(function ($row) use ($hostileIds, $characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames, $monitoredJoinDates, $accountMonitoredJoinDate) {
-                        $matchedEntity = $this->matchedHostileKillmailEntity($row, $hostileIds);
-                        $monitoredJoinDate = $monitoredJoinDates->get((int) $row->monitored_character_id);
+                    ->map(function ($row) use ($monitoredEntityIds, $characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames, $monitoredJoinDates, $accountMonitoredJoinDate) {
+                        $matchedEntity = $this->matchedHostileKillmailEntity($row, $monitoredEntityIds);
+                        $characterJoinDate = $monitoredJoinDates->get((int) $row->monitored_character_id);
+                        $effectiveJoinDate = $characterJoinDate ?: $accountMonitoredJoinDate;
 
                         return [
                             'killmail_id' => (int) $row->killmail_id,
                             'killmail_time' => $this->dateString($row->killmail_time),
                             'age_days' => $this->ageDays($row->killmail_time),
                             'recency_bucket' => $this->ageDays($row->killmail_time) === null ? 'unknown' : ($this->ageDays($row->killmail_time) <= 730 ? 'recent' : 'old'),
-                            'monitored_group_joined_at' => $this->dateString($monitoredJoinDate),
+                            'monitored_group_joined_at' => $this->dateString($effectiveJoinDate),
+                            'monitored_group_joined_at_source' => $characterJoinDate ? 'character' : 'account',
                             'account_monitored_group_joined_at' => $this->dateString($accountMonitoredJoinDate),
-                            'same_side_pre_join' => $row->relationship === 'same_side_attacker',
                             'solar_system_id' => $row->solar_system_id ? (int) $row->solar_system_id : null,
                             'solar_system_name' => $row->solar_system_id ? $systemNames->get((int) $row->solar_system_id) : null,
                             'relationship' => $row->relationship,
@@ -1238,8 +1362,9 @@ class IntelReportRefresher
                             'hostile_ship_type_name' => $row->hostile_ship_type_id ? $shipNames->get((int) $row->hostile_ship_type_id) : null,
                             'matched_entity_type' => $matchedEntity['type'],
                             'matched_entity_id' => $matchedEntity['id'],
-                            'final_blow' => (bool) $row->hostile_final_blow,
-                            'damage_done' => $row->hostile_damage_done !== null ? (int) $row->hostile_damage_done : null,
+                            'target_is_monitored_group' => true,
+                            'final_blow' => false,
+                            'damage_done' => null,
                         ];
                     })
                     ->values()
@@ -1248,38 +1373,330 @@ class IntelReportRefresher
         ]);
     }
 
-    private function hostileKillmailScore(int $recentSameSideCount, int $oldSameSideCount, int $recentOpposedCount, int $oldOpposedCount): int
+    private function hostileKillmailScore(int $recentCount, int $oldCount): int
     {
-        if ($recentSameSideCount > 0) {
-            return 45;
+        if ($recentCount > 0) {
+            return min(45, 25 + ($recentCount * 5));
         }
 
-        if ($oldSameSideCount > 0) {
-            return min(25, 12 + ($oldSameSideCount * 3));
+        if ($oldCount > 0) {
+            return min(25, 10 + ($oldCount * 3));
         }
 
-        if ($recentOpposedCount > 0) {
-            return min(20, 10 + ($recentOpposedCount * 2));
-        }
-
-        return min(8, max(2, $oldOpposedCount * 2));
+        return 0;
     }
 
-    private function hostileKillmailScoreRule(int $recentSameSideCount, int $oldSameSideCount, int $recentOpposedCount): string
+    private function hostileKillmailScoreRule(int $recentCount, int $oldCount): string
     {
-        if ($recentSameSideCount > 0) {
-            return 'Same-side hostile killmail activity before joining the monitored group, in the last two years, is treated as high-signal evidence.';
+        if ($recentCount > 0) {
+            return 'Recent pre-join kills against monitored groups are treated as a strong signal because they happened before the character or account joined.';
         }
 
-        if ($oldSameSideCount > 0) {
-            return 'Same-side hostile killmail activity before joining the monitored group and older than two years is still shown but down-weighted.';
+        if ($oldCount > 0) {
+            return 'Older pre-join kills against monitored groups are shown but down-weighted because old combat history is weaker context.';
         }
 
-        if ($recentOpposedCount > 0) {
-            return 'Recent opposed killmail activity with hostile entities is contextual and lower severity than same-side activity.';
+        return 'No pre-join kills against monitored groups were found.';
+    }
+
+    private function addPreJoinKillmailClusterEvidence(User $user, $characterIds, $evidence): void
+    {
+        if ($characterIds->isEmpty()
+            || !Schema::hasTable('killmail_attackers')
+            || !Schema::hasTable('killmail_details')
+            || !Schema::hasColumn('killmail_attackers', 'character_id')
+            || !Schema::hasColumn('killmail_details', 'killmail_time')) {
+            return;
         }
 
-        return 'Only older opposed killmail activity was found, so the score is low.';
+        $monitoredJoinDates = $this->monitoredGroupJoinDates($characterIds);
+        $accountMonitoredJoinDate = $monitoredJoinDates->filter()->sort()->first();
+
+        if (!$accountMonitoredJoinDate) {
+            return;
+        }
+
+        $monitoredEntityIds = $this->monitoredKillmailEntityIds()->flip();
+        $hostileEntityIds = $this->hostileKillmailEntityIds()->flip();
+        $accountCharacterIds = $characterIds->map(fn ($id) => (int) $id)->flip();
+
+        $rows = DB::table('killmail_attackers as monitored')
+            ->join('killmail_attackers as other', 'other.killmail_id', '=', 'monitored.killmail_id')
+            ->join('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id')
+            ->whereIn('monitored.character_id', $characterIds->all())
+            ->where(function ($query) {
+                $query->whereColumn('other.character_id', '!=', 'monitored.character_id')
+                    ->orWhereNull('other.character_id');
+            })
+            ->select([
+                'monitored.killmail_id',
+                DB::raw('details.killmail_time as killmail_time'),
+                DB::raw('details.solar_system_id as solar_system_id'),
+                DB::raw('monitored.character_id as monitored_character_id'),
+                DB::raw('monitored.ship_type_id as monitored_ship_type_id'),
+                DB::raw('other.character_id as other_character_id'),
+                DB::raw('other.corporation_id as other_corporation_id'),
+                DB::raw('other.alliance_id as other_alliance_id'),
+                DB::raw('other.ship_type_id as other_ship_type_id'),
+            ])
+            ->get()
+            ->filter(function ($row) use ($monitoredJoinDates, $accountMonitoredJoinDate, $accountCharacterIds, $monitoredEntityIds) {
+                if (!$row->killmail_time) {
+                    return false;
+                }
+
+                $joinDate = $monitoredJoinDates->get((int) $row->monitored_character_id) ?: $accountMonitoredJoinDate;
+
+                if (!$joinDate || strtotime((string) $row->killmail_time) >= strtotime((string) $joinDate)) {
+                    return false;
+                }
+
+                if ($row->other_character_id && $accountCharacterIds->has((int) $row->other_character_id)) {
+                    return false;
+                }
+
+                foreach ([$row->other_character_id, $row->other_corporation_id, $row->other_alliance_id] as $entityId) {
+                    if ($entityId && $monitoredEntityIds->has((int) $entityId)) {
+                        return false;
+                    }
+                }
+
+                return $row->other_character_id || $row->other_corporation_id || $row->other_alliance_id;
+            })
+            ->values();
+
+        if ($rows->isEmpty()) {
+            return;
+        }
+
+        $clusters = $rows
+            ->groupBy(function ($row) {
+                if ($row->other_alliance_id) {
+                    return 'alliance:' . (int) $row->other_alliance_id;
+                }
+
+                if ($row->other_corporation_id) {
+                    return 'corporation:' . (int) $row->other_corporation_id;
+                }
+
+                return 'character:' . (int) $row->other_character_id;
+            })
+            ->map(function ($clusterRows, $key) use ($hostileEntityIds) {
+                [$entityType, $entityId] = explode(':', $key, 2);
+                $entityId = (int) $entityId;
+                $killmailIds = $clusterRows->pluck('killmail_id')->filter()->unique()->values();
+                $activeDates = $clusterRows
+                    ->pluck('killmail_time')
+                    ->filter()
+                    ->map(fn ($time) => \Illuminate\Support\Carbon::parse($time)->toDateString())
+                    ->unique()
+                    ->values();
+                $hostile = $hostileEntityIds->has($entityId)
+                    || $clusterRows->contains(fn ($row) => ($row->other_character_id && $hostileEntityIds->has((int) $row->other_character_id))
+                        || ($row->other_corporation_id && $hostileEntityIds->has((int) $row->other_corporation_id))
+                        || ($row->other_alliance_id && $hostileEntityIds->has((int) $row->other_alliance_id)));
+                $recentCount = $clusterRows
+                    ->filter(fn ($row) => $this->ageDays($row->killmail_time) !== null && $this->ageDays($row->killmail_time) <= 730)
+                    ->pluck('killmail_id')
+                    ->unique()
+                    ->count();
+
+                return [
+                    'entity_type' => $entityType,
+                    'entity_id' => $entityId,
+                    'hostile' => $hostile,
+                    'killmail_count' => $killmailIds->count(),
+                    'active_day_count' => $activeDates->count(),
+                    'recent_killmail_count' => $recentCount,
+                    'first_seen_at' => $this->dateString($clusterRows->pluck('killmail_time')->filter()->sort()->first()),
+                    'last_seen_at' => $this->dateString($clusterRows->pluck('killmail_time')->filter()->sortDesc()->first()),
+                    'killmails' => $clusterRows
+                        ->sortByDesc(fn ($row) => $row->killmail_time ?: $row->killmail_id)
+                        ->unique('killmail_id')
+                        ->take(8)
+                        ->values(),
+                ];
+            })
+            ->filter(fn ($cluster) => data_get($cluster, 'killmail_count') >= 3 || data_get($cluster, 'active_day_count') >= 2)
+            ->sortByDesc(fn ($cluster) => (data_get($cluster, 'hostile') ? 1000 : 0) + (data_get($cluster, 'killmail_count') * 10) + data_get($cluster, 'active_day_count'))
+            ->values();
+
+        if ($clusters->isEmpty()) {
+            return;
+        }
+
+        $characterNames = $this->characterNames($rows->pluck('monitored_character_id')->merge($rows->pluck('other_character_id')));
+        $corporationNames = $this->corporationNames($rows->pluck('other_corporation_id')->filter()->unique()->values());
+        $allianceNames = $this->allianceNames($rows->pluck('other_alliance_id')->filter()->unique()->values());
+        $shipNames = $this->typeNames($rows->pluck('monitored_ship_type_id')->merge($rows->pluck('other_ship_type_id')));
+        $systemNames = $this->solarSystemNames($rows->pluck('solar_system_id'));
+        $hostileClusterCount = $clusters->where('hostile', true)->count();
+        $topCluster = $clusters->first();
+        $score = data_get($topCluster, 'hostile')
+            ? min(45, 28 + (data_get($topCluster, 'killmail_count') * 3) + (data_get($topCluster, 'active_day_count') * 2))
+            : min(30, 16 + (data_get($topCluster, 'killmail_count') * 2) + data_get($topCluster, 'active_day_count'));
+
+        $evidence->push([
+            'category' => 'prejoin_killmail_cluster',
+            'score' => $score,
+            'title' => 'Repeated pre-join killmail activity with outside groups',
+            'details' => sprintf('%s has linked account characters repeatedly appearing on killmails with the same hostile or non-monitored same-side groups before joining a monitored group.', $user->name),
+            'meta' => [
+                'cluster_count' => $clusters->count(),
+                'hostile_cluster_count' => $hostileClusterCount,
+                'score_rule' => $hostileClusterCount > 0
+                    ? 'Repeated pre-join activity with configured hostile groups is scored higher than non-monitored outside groups.'
+                    : 'Repeated pre-join activity with the same non-monitored outside groups is scored as medium context.',
+                'clusters' => $clusters->take(10)->map(function ($cluster) use ($characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames, $monitoredJoinDates, $accountMonitoredJoinDate) {
+                    $entityType = data_get($cluster, 'entity_type');
+                    $entityId = (int) data_get($cluster, 'entity_id');
+                    $entityName = $entityType === 'alliance'
+                        ? $allianceNames->get($entityId)
+                        : ($entityType === 'corporation' ? $corporationNames->get($entityId) : $characterNames->get($entityId));
+
+                    return [
+                        'entity_type' => $entityType,
+                        'entity_id' => $entityId,
+                        'entity_name' => $entityName,
+                        'hostile' => (bool) data_get($cluster, 'hostile'),
+                        'killmail_count' => (int) data_get($cluster, 'killmail_count'),
+                        'active_day_count' => (int) data_get($cluster, 'active_day_count'),
+                        'recent_killmail_count' => (int) data_get($cluster, 'recent_killmail_count'),
+                        'first_seen_at' => data_get($cluster, 'first_seen_at'),
+                        'last_seen_at' => data_get($cluster, 'last_seen_at'),
+                        'killmails' => collect(data_get($cluster, 'killmails', []))->map(function ($row) use ($characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames, $monitoredJoinDates, $accountMonitoredJoinDate) {
+                            $characterJoinDate = $monitoredJoinDates->get((int) $row->monitored_character_id);
+
+                            return [
+                                'killmail_id' => (int) $row->killmail_id,
+                                'killmail_time' => $this->dateString($row->killmail_time),
+                                'solar_system_id' => $row->solar_system_id ? (int) $row->solar_system_id : null,
+                                'solar_system_name' => $row->solar_system_id ? $systemNames->get((int) $row->solar_system_id) : null,
+                                'monitored_character_id' => (int) $row->monitored_character_id,
+                                'monitored_character_name' => $characterNames->get((int) $row->monitored_character_id),
+                                'monitored_group_joined_at' => $this->dateString($characterJoinDate ?: $accountMonitoredJoinDate),
+                                'monitored_ship_type_id' => $row->monitored_ship_type_id ? (int) $row->monitored_ship_type_id : null,
+                                'monitored_ship_type_name' => $row->monitored_ship_type_id ? $shipNames->get((int) $row->monitored_ship_type_id) : null,
+                                'other_character_id' => $row->other_character_id ? (int) $row->other_character_id : null,
+                                'other_character_name' => $row->other_character_id ? $characterNames->get((int) $row->other_character_id) : null,
+                                'other_corporation_id' => $row->other_corporation_id ? (int) $row->other_corporation_id : null,
+                                'other_corporation_name' => $row->other_corporation_id ? $corporationNames->get((int) $row->other_corporation_id) : null,
+                                'other_alliance_id' => $row->other_alliance_id ? (int) $row->other_alliance_id : null,
+                                'other_alliance_name' => $row->other_alliance_id ? $allianceNames->get((int) $row->other_alliance_id) : null,
+                                'other_ship_type_id' => $row->other_ship_type_id ? (int) $row->other_ship_type_id : null,
+                                'other_ship_type_name' => $row->other_ship_type_id ? $shipNames->get((int) $row->other_ship_type_id) : null,
+                            ];
+                        })->values()->all(),
+                    ];
+                })->values()->all(),
+            ],
+        ]);
+    }
+
+    private function addPreJoinMonitoredLossmailEvidence(User $user, $characterIds, $evidence): void
+    {
+        if ($characterIds->isEmpty()
+            || !Schema::hasTable('killmail_attackers')
+            || !Schema::hasTable('killmail_victims')
+            || !Schema::hasTable('killmail_details')
+            || !Schema::hasColumn('killmail_attackers', 'character_id')
+            || !Schema::hasColumn('killmail_victims', 'character_id')
+            || !Schema::hasColumn('killmail_details', 'killmail_time')) {
+            return;
+        }
+
+        $monitoredJoinDates = $this->monitoredGroupJoinDates($characterIds);
+        $accountMonitoredJoinDate = $monitoredJoinDates->filter()->sort()->first();
+
+        if (!$accountMonitoredJoinDate) {
+            return;
+        }
+
+        $monitoredEntityIds = $this->monitoredKillmailEntityIds();
+
+        if ($monitoredEntityIds->isEmpty()) {
+            return;
+        }
+
+        $matches = DB::table('killmail_victims as monitored')
+            ->join('killmail_attackers as attacker', 'attacker.killmail_id', '=', 'monitored.killmail_id')
+            ->join('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id')
+            ->whereIn('monitored.character_id', $characterIds->all())
+            ->where('details.killmail_time', '<', $accountMonitoredJoinDate)
+            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'attacker', $monitoredEntityIds))
+            ->where(function ($query) {
+                $query->whereColumn('attacker.character_id', '!=', 'monitored.character_id')
+                    ->orWhereNull('attacker.character_id');
+            })
+            ->select($this->killmailEvidenceSelects('monitored', 'attacker', true, 'victim', 'monitored_group_attacker', true))
+            ->get()
+            ->unique(fn ($row) => implode(':', [
+                $row->killmail_id,
+                $row->monitored_character_id,
+                $row->hostile_character_id,
+                $row->hostile_corporation_id,
+                $row->hostile_alliance_id,
+            ]))
+            ->values();
+
+        if ($matches->isEmpty()) {
+            return;
+        }
+
+        $characterNames = $this->characterNames($matches->pluck('monitored_character_id')->merge($matches->pluck('hostile_character_id')));
+        $corporationNames = $this->corporationNames($matches->pluck('hostile_corporation_id')->filter()->unique()->values());
+        $allianceNames = $this->allianceNames($matches->pluck('hostile_alliance_id')->filter()->unique()->values());
+        $shipNames = $this->typeNames($matches->pluck('monitored_ship_type_id')->merge($matches->pluck('hostile_ship_type_id')));
+        $systemNames = $this->solarSystemNames($matches->pluck('solar_system_id'));
+
+        $evidence->push([
+            'category' => 'prejoin_monitored_lossmail',
+            'score' => 10,
+            'title' => 'Pre-join losses to monitored groups',
+            'details' => sprintf('%s has linked account characters that were killed by monitored group members before the account joined a monitored corporation/alliance.', $user->name),
+            'meta' => [
+                'account_monitored_group_joined_at' => $this->dateString($accountMonitoredJoinDate),
+                'total_count' => $matches->count(),
+                'score_rule' => 'Low-severity context signal: pre-join losses to monitored groups can suggest prior conflict or a possible grudge, but are not suspicious by themselves.',
+                'matches' => $matches
+                    ->sortByDesc(fn ($row) => $row->killmail_time ?: $row->killmail_id)
+                    ->take(20)
+                    ->map(function ($row) use ($characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames, $monitoredJoinDates, $accountMonitoredJoinDate) {
+                        $monitoredJoinDate = $monitoredJoinDates->get((int) $row->monitored_character_id);
+
+                        return [
+                            'killmail_id' => (int) $row->killmail_id,
+                            'killmail_time' => $this->dateString($row->killmail_time),
+                            'age_days' => $this->ageDays($row->killmail_time),
+                            'recency_bucket' => $this->ageDays($row->killmail_time) === null ? 'unknown' : ($this->ageDays($row->killmail_time) <= 730 ? 'recent' : 'old'),
+                            'monitored_group_joined_at' => $this->dateString($monitoredJoinDate),
+                            'account_monitored_group_joined_at' => $this->dateString($accountMonitoredJoinDate),
+                            'solar_system_id' => $row->solar_system_id ? (int) $row->solar_system_id : null,
+                            'solar_system_name' => $row->solar_system_id ? $systemNames->get((int) $row->solar_system_id) : null,
+                            'relationship' => 'monitored_group_attacker',
+                            'monitored_side' => 'victim',
+                            'monitored_character_id' => (int) $row->monitored_character_id,
+                            'monitored_character_name' => $characterNames->get((int) $row->monitored_character_id),
+                            'monitored_corporation_id' => $row->monitored_corporation_id ? (int) $row->monitored_corporation_id : null,
+                            'monitored_alliance_id' => $row->monitored_alliance_id ? (int) $row->monitored_alliance_id : null,
+                            'monitored_ship_type_id' => $row->monitored_ship_type_id ? (int) $row->monitored_ship_type_id : null,
+                            'monitored_ship_type_name' => $row->monitored_ship_type_id ? $shipNames->get((int) $row->monitored_ship_type_id) : null,
+                            'hostile_character_id' => $row->hostile_character_id ? (int) $row->hostile_character_id : null,
+                            'hostile_character_name' => $row->hostile_character_id ? $characterNames->get((int) $row->hostile_character_id) : null,
+                            'hostile_corporation_id' => $row->hostile_corporation_id ? (int) $row->hostile_corporation_id : null,
+                            'hostile_corporation_name' => $row->hostile_corporation_id ? $corporationNames->get((int) $row->hostile_corporation_id) : null,
+                            'hostile_alliance_id' => $row->hostile_alliance_id ? (int) $row->hostile_alliance_id : null,
+                            'hostile_alliance_name' => $row->hostile_alliance_id ? $allianceNames->get((int) $row->hostile_alliance_id) : null,
+                            'hostile_ship_type_id' => $row->hostile_ship_type_id ? (int) $row->hostile_ship_type_id : null,
+                            'hostile_ship_type_name' => $row->hostile_ship_type_id ? $shipNames->get((int) $row->hostile_ship_type_id) : null,
+                            'final_blow' => (bool) $row->hostile_final_blow,
+                            'damage_done' => $row->hostile_damage_done !== null ? (int) $row->hostile_damage_done : null,
+                        ];
+                    })
+                    ->values()
+                    ->all(),
+            ],
+        ]);
     }
 
     private function whereHostileKillmailParty($query, string $alias, $hostileIds)
@@ -1795,16 +2212,25 @@ class IntelReportRefresher
 
         $corporationIds = $entities->where('entity_type', 'corporation')->pluck('entity_id')->map(fn ($id) => (int) $id)->all();
         $allianceIds = $entities->where('entity_type', 'alliance')->pluck('entity_id')->map(fn ($id) => (int) $id)->all();
+        $characterInfoHasCorporationId = Schema::hasColumn('character_infos', 'corporation_id');
 
         return CharacterInfo::query()
-            ->when(!empty($corporationIds) || !empty($allianceIds), function ($query) use ($corporationIds, $allianceIds) {
-                $query->where(function ($inner) use ($corporationIds, $allianceIds) {
+            ->when(!empty($corporationIds) || !empty($allianceIds), function ($query) use ($corporationIds, $allianceIds, $characterInfoHasCorporationId) {
+                $query->where(function ($inner) use ($corporationIds, $allianceIds, $characterInfoHasCorporationId) {
                     if (!empty($corporationIds)) {
-                        $inner->where(function ($corporationQuery) use ($corporationIds) {
-                            $corporationQuery->whereIn('corporation_id', $corporationIds)
-                                ->orWhereHas('affiliation', function ($affiliationQuery) use ($corporationIds) {
-                                    $affiliationQuery->whereIn('corporation_id', $corporationIds);
-                                });
+                        $inner->where(function ($corporationQuery) use ($corporationIds, $characterInfoHasCorporationId) {
+                            if ($characterInfoHasCorporationId) {
+                                $corporationQuery->whereIn('corporation_id', $corporationIds)
+                                    ->orWhereHas('affiliation', function ($affiliationQuery) use ($corporationIds) {
+                                        $affiliationQuery->whereIn('corporation_id', $corporationIds);
+                                    });
+
+                                return;
+                            }
+
+                            $corporationQuery->whereHas('affiliation', function ($affiliationQuery) use ($corporationIds) {
+                                $affiliationQuery->whereIn('corporation_id', $corporationIds);
+                            });
                         });
                     }
 
@@ -1918,6 +2344,82 @@ class IntelReportRefresher
             ->filter()
             ->unique()
             ->values();
+    }
+
+    private function monitoredKillmailEntityIds()
+    {
+        $entityIds = IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_MONITORED)
+            ->pluck('entity_id')
+            ->map(fn ($id) => (int) $id);
+
+        return $entityIds
+            ->merge($this->monitoredCorporationIds())
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    private function hostileCorporationIds()
+    {
+        $entities = IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_HOSTILE)
+            ->get();
+
+        $corporationIds = $entities
+            ->where('entity_type', 'corporation')
+            ->pluck('entity_id')
+            ->map(fn ($id) => (int) $id);
+        $allianceIds = $entities
+            ->where('entity_type', 'alliance')
+            ->pluck('entity_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter()
+            ->values();
+        $allianceCorporationIds = collect();
+
+        if ($allianceIds->isNotEmpty() && Schema::hasTable('alliance_members') && Schema::hasColumn('alliance_members', 'alliance_id') && Schema::hasColumn('alliance_members', 'corporation_id')) {
+            $allianceCorporationIds = DB::table('alliance_members')
+                ->whereIn('alliance_id', $allianceIds->all())
+                ->pluck('corporation_id')
+                ->map(fn ($id) => (int) $id);
+        }
+
+        $cachedHostileCorporationIds = collect();
+
+        if (Schema::hasTable('seat_spy_hunter_evewho_members')) {
+            $cachedHostileCorporationIds = EveWhoMember::query()
+                ->whereIn('source_entity_type', ['corporation', 'alliance'])
+                ->whereIn('source_entity_id', $entities->pluck('entity_id')->map(fn ($id) => (int) $id)->all())
+                ->pluck('corporation_id')
+                ->map(fn ($id) => (int) $id);
+        }
+
+        return $corporationIds
+            ->merge($allianceCorporationIds)
+            ->merge($cachedHostileCorporationIds)
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    private function hostileKillmailEntityIds()
+    {
+        $entityIds = IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_HOSTILE)
+            ->pluck('entity_id')
+            ->map(fn ($id) => (int) $id);
+
+        return $entityIds
+            ->merge($this->hostileCorporationIds())
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    private function isPlayerCorporationId(int $corporationId): bool
+    {
+        return $corporationId >= self::PLAYER_CORPORATION_ID_FLOOR;
     }
 
     private function monitoredGroupJoinDates($characterIds)

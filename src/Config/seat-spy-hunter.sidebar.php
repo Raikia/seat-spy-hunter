@@ -23,6 +23,13 @@ return [
                 'permission' => 'seat-spy-hunter.settings',
             ],
             [
+                'name' => 'Help',
+                'label' => 'seat-spy-hunter::sidebar.help',
+                'icon' => 'fas fa-question-circle',
+                'route' => 'seat-spy-hunter.help',
+                'permission' => 'seat-spy-hunter.view',
+            ],
+            [
                 'name' => 'Settings',
                 'label' => 'seat-spy-hunter::sidebar.settings',
                 'icon' => 'fas fa-cog',

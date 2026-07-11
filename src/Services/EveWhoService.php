@@ -204,6 +204,7 @@ class EveWhoService
                     $localRecent = $this->employmentTouchesRecentWindow($local->start_date, $local->end_date);
                     $hostileRecent = $this->employmentTouchesRecentWindow($hostile->start_date, $hostile->end_date);
                     $departureDeltaDays = $this->departureDeltaDays($local->end_date, $hostile->end_date);
+                    $closeDeparture = $sameTime && $departureDeltaDays !== null && $departureDeltaDays <= 10;
                     $corporation = $corporationDetails->get((int) $local->corporation_id, []);
                     $allianceId = data_get($corporation, 'alliance_id');
 
@@ -224,20 +225,24 @@ class EveWhoService
                         'local_recent' => $localRecent,
                         'hostile_recent' => $hostileRecent,
                         'both_recent' => $localRecent && $hostileRecent,
-                        'close_departure' => $departureDeltaDays !== null && $departureDeltaDays <= 10,
+                        'close_departure' => $closeDeparture,
                         'departure_delta_days' => $departureDeltaDays,
                         'overlap_start_date' => $this->dateOnlyString(data_get($overlapWindow, 'start')),
                         'overlap_end_date' => $this->dateOnlyString(data_get($overlapWindow, 'end')),
                         'overlap_last_seen_date' => $this->dateOnlyString($lastRelevantDate),
                         'overlap_age_days' => $ageDays,
                         'overlap_age_bucket' => $this->overlapAgeBucket($ageDays),
+                        'match_priority' => $this->employmentOverlapMatchPriority($sameTime, $closeDeparture, $localRecent && $hostileRecent, $ageDays),
                         'source_entity_type' => $member ? $member->source_entity_type : null,
                         'source_entity_id' => $member ? $member->source_entity_id : null,
                         'source_entity_name' => $member ? $sourceEntityNames->get($member->source_entity_type . ':' . (int) $member->source_entity_id) : null,
                     ];
                 });
         })
-            ->sortByDesc(fn (array $match) => $match['overlap_last_seen_date'] ? strtotime($match['overlap_last_seen_date']) : 0)
+            ->sortByDesc(fn (array $match) => sprintf('%03d:%010d',
+                (int) ($match['match_priority'] ?? 0),
+                $match['overlap_last_seen_date'] ? strtotime($match['overlap_last_seen_date']) : 0
+            ))
             ->values();
     }
 
@@ -385,7 +390,7 @@ class EveWhoService
             return collect([$localEnd, $hostileEnd])->filter()->sort()->first();
         }
 
-        return collect([$localStart, $localEnd, $hostileStart, $hostileEnd])
+        return collect([$localEnd, $localStart])
             ->filter()
             ->sortDesc()
             ->first();
@@ -406,6 +411,31 @@ class EveWhoService
         }
 
         return 'old';
+    }
+
+    private function employmentOverlapMatchPriority(bool $sameTime, bool $closeDeparture, bool $bothRecent, ?int $ageDays): int
+    {
+        if ($closeDeparture) {
+            return 100;
+        }
+
+        if ($sameTime && $ageDays !== null && $ageDays <= 730) {
+            return 80;
+        }
+
+        if ($sameTime) {
+            return 60;
+        }
+
+        if ($bothRecent) {
+            return 40;
+        }
+
+        if ($ageDays !== null && $ageDays <= 730) {
+            return 20;
+        }
+
+        return 0;
     }
 
     private function employmentTouchesRecentWindow($startDate, $endDate, int $days = 730): bool
@@ -475,30 +505,88 @@ class EveWhoService
 
     private function corporationNames(Collection $corporationIds): Collection
     {
-        if ($corporationIds->isEmpty() || !Schema::hasTable('corporation_infos')) {
+        $corporationIds = $corporationIds
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($corporationIds->isEmpty()) {
             return collect();
         }
 
-        return DB::table('corporation_infos')
-            ->whereIn('corporation_id', $corporationIds->all())
-            ->pluck('name', 'corporation_id');
+        $names = collect();
+
+        if (Schema::hasTable('corporation_infos')) {
+            $names = $names->union(
+                DB::table('corporation_infos')
+                    ->whereIn('corporation_id', $corporationIds->all())
+                    ->pluck('name', 'corporation_id')
+            );
+        }
+
+        $missingIds = $corporationIds->reject(fn ($id) => $names->has((int) $id))->values();
+
+        if ($missingIds->isNotEmpty() && Schema::hasTable('universe_names')) {
+            $names = $names->union(
+                DB::table('universe_names')
+                    ->whereIn('entity_id', $missingIds->all())
+                    ->pluck('name', 'entity_id')
+            );
+        }
+
+        $missingIds = $corporationIds->reject(fn ($id) => $names->has((int) $id))->values();
+
+        if ($missingIds->isNotEmpty() && Schema::hasTable('invNames')) {
+            $names = $names->union(
+                DB::table('invNames')
+                    ->whereIn('itemID', $missingIds->all())
+                    ->pluck('itemName', 'itemID')
+            );
+        }
+
+        return $names;
     }
 
     private function corporationDetails(Collection $corporationIds): Collection
     {
-        if ($corporationIds->isEmpty() || !Schema::hasTable('corporation_infos')) {
+        $corporationIds = $corporationIds
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($corporationIds->isEmpty()) {
             return collect();
         }
 
-        return DB::table('corporation_infos')
-            ->whereIn('corporation_id', $corporationIds->map(fn ($id) => (int) $id)->all())
-            ->get(['corporation_id', 'name', 'alliance_id'])
-            ->mapWithKeys(fn ($row) => [
-                (int) $row->corporation_id => [
-                    'name' => $row->name,
-                    'alliance_id' => $row->alliance_id ? (int) $row->alliance_id : null,
-                ],
-            ]);
+        $details = collect();
+
+        if (Schema::hasTable('corporation_infos')) {
+            $details = DB::table('corporation_infos')
+                ->whereIn('corporation_id', $corporationIds->all())
+                ->get(['corporation_id', 'name', 'alliance_id'])
+                ->mapWithKeys(fn ($row) => [
+                    (int) $row->corporation_id => [
+                        'name' => $row->name,
+                        'alliance_id' => $row->alliance_id ? (int) $row->alliance_id : null,
+                    ],
+                ]);
+        }
+
+        $this->corporationNames($corporationIds)
+            ->each(function ($name, $corporationId) use ($details) {
+                $corporationId = (int) $corporationId;
+                $existing = $details->get($corporationId, []);
+
+                if (!data_get($existing, 'name')) {
+                    $existing['name'] = $name;
+                    $existing['alliance_id'] = data_get($existing, 'alliance_id');
+                    $details->put($corporationId, $existing);
+                }
+            });
+
+        return $details;
     }
 
     private function allianceNames(Collection $allianceIds): Collection

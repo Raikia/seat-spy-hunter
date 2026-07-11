@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Schema;
 use Raikia\SeatSpyHunter\Jobs\RefreshIntelReportsJob;
 use Raikia\SeatSpyHunter\Models\CharacterIntelReport;
 use Raikia\SeatSpyHunter\Models\FalsePositiveSuppression;
+use Raikia\SeatSpyHunter\Services\EvidenceScoreGuide;
 use Seat\Web\Http\Controllers\Controller;
 
 class IntelDashboardController extends Controller
@@ -91,13 +92,16 @@ class IntelDashboardController extends Controller
             'hostile_mail' => 'Hostile Mail',
             'hostile_wallet_direct' => 'Direct Wallet Dealings',
             'hostile_market_transaction' => 'Market Transactions',
-            'hostile_killmail' => 'Hostile Killmail',
+            'hostile_killmail' => 'Pre-Join Kills vs Monitored',
+            'prejoin_killmail_cluster' => 'Pre-Join Killmail Clustering',
+            'prejoin_monitored_lossmail' => 'Pre-Join Monitored Loss',
             'hostile_contract' => 'Hostile Contracts',
             'risk_confidence' => 'Risk Confidence',
             'new_evidence_since_review' => 'New Evidence Since Review',
             'suppressed_signals' => 'Suppressed Evidence',
             'esi_coverage_health' => 'ESI Coverage Health',
             'hostile_corporation_history' => 'Hostile Corp History',
+            'post_leave_hostile_join' => 'Post-Leave Hostile Join',
             'hostile_asset_location' => 'Hostile Asset Location',
             'shared_ip' => 'Shared IP',
             'vpn_ip' => 'VPN / Proxy',
@@ -115,7 +119,7 @@ class IntelDashboardController extends Controller
             'low_asset_value' => 'Low Asset Value',
             'corporation_history_churn' => 'Corp Churn',
             'quiet_corporation_history' => 'Quiet Corp History',
-            'recent_neutral_corporation_history' => 'Recent Neutral Corp',
+            'recent_neutral_corporation_history' => 'Recent Outside Corp',
             'missing_token' => 'Missing Token',
             'deleted_token' => 'Deleted Token',
             'missing_refresh_token' => 'Missing Refresh Token',
@@ -133,6 +137,15 @@ class IntelDashboardController extends Controller
         $report->load('evidence', 'suppressions');
 
         return view('seat-spy-hunter::show', compact('report'));
+    }
+
+    public function help(EvidenceScoreGuide $guide)
+    {
+        return view('seat-spy-hunter::help', [
+            'evidenceRows' => $guide->rows(),
+            'ratings' => $guide->ratings(),
+            'confidenceLevels' => $guide->confidenceLevels(),
+        ]);
     }
 
     public function refresh()
