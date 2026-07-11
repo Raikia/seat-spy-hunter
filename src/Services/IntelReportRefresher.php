@@ -1168,9 +1168,10 @@ class IntelReportRefresher
         $old = $overlaps->where('overlap_age_bucket', 'old');
         $unknownAge = $overlaps->where('overlap_age_bucket', 'unknown');
         $closeDepartures = $overlaps->where('close_departure', true);
+        $recentCloseDepartures = $closeDepartures->where('overlap_age_bucket', 'recent');
         $recentSameTime = $overlaps->filter(fn ($match) => data_get($match, 'same_time') && data_get($match, 'overlap_age_bucket') === 'recent');
         $recentDifferentTime = $overlaps->filter(fn ($match) => !data_get($match, 'same_time') && data_get($match, 'both_recent'));
-        $score = $this->employmentOverlapScore($overlaps, $closeDepartures, $recentSameTime, $recentDifferentTime);
+        $score = $this->employmentOverlapScore($overlaps, $closeDepartures, $recentCloseDepartures, $recentSameTime, $recentDifferentTime);
 
         $evidence->push([
             'category' => 'hostile_employment_overlap',
@@ -1185,6 +1186,7 @@ class IntelReportRefresher
                 'same_time_count' => $sameTime->count(),
                 'different_time_count' => $overlaps->count() - $sameTime->count(),
                 'close_departure_count' => $closeDepartures->count(),
+                'recent_close_departure_count' => $recentCloseDepartures->count(),
                 'recent_same_time_count' => $recentSameTime->count(),
                 'recent_different_time_count' => $recentDifferentTime->count(),
                 'recent_count' => $recent->count(),
@@ -1198,9 +1200,9 @@ class IntelReportRefresher
         ]);
     }
 
-    private function employmentOverlapScore($overlaps, $closeDepartures, $recentSameTime, $recentDifferentTime): int
+    private function employmentOverlapScore($overlaps, $closeDepartures, $recentCloseDepartures, $recentSameTime, $recentDifferentTime): int
     {
-        if ($closeDepartures->isNotEmpty()) {
+        if ($recentCloseDepartures->isNotEmpty()) {
             return 100;
         }
 
@@ -1210,6 +1212,10 @@ class IntelReportRefresher
 
         if ($recentDifferentTime->isNotEmpty()) {
             return 25;
+        }
+
+        if ($closeDepartures->isNotEmpty()) {
+            return 20;
         }
 
         if ($overlaps->where('same_time', true)->isNotEmpty()) {
@@ -1222,7 +1228,7 @@ class IntelReportRefresher
     private function employmentOverlapScoreRule(int $score): string
     {
         if ($score === 100) {
-            return 'Monitored and hostile characters left the same corporation within 10 days of each other.';
+            return 'Monitored and hostile characters left the same corporation within 10 days of each other in the last two years.';
         }
 
         if ($score === 45) {
@@ -1231,6 +1237,10 @@ class IntelReportRefresher
 
         if ($score === 25) {
             return 'No same-time overlap, but both characters were in the same corporation during the last two years.';
+        }
+
+        if ($score === 20) {
+            return 'Monitored and hostile characters left the same corporation within 10 days of each other, but that happened more than two years ago.';
         }
 
         return 'Historical overlap only; monitored character was not in that corporation during the last two years, so this is capped at low severity.';
