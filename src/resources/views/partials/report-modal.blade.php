@@ -1335,7 +1335,13 @@
                                                         @foreach(data_get($cluster, 'killmails', []) as $killmail)
                                                             <tr>
                                                                 <td>
-                                                                    #{{ data_get($killmail, 'killmail_id') }}
+                                                                    @if(data_get($killmail, 'killmail_id'))
+                                                                        <a href="https://zkillboard.com/kill/{{ data_get($killmail, 'killmail_id') }}/" target="_blank" rel="noopener noreferrer">
+                                                                            #{{ data_get($killmail, 'killmail_id') }}
+                                                                        </a>
+                                                                    @else
+                                                                        Unknown killmail
+                                                                    @endif
                                                                     <div class="small text-muted">{{ data_get($killmail, 'killmail_time') ?: 'Unknown time' }}</div>
                                                                     @if(data_get($killmail, 'solar_system_name') || data_get($killmail, 'solar_system_id'))
                                                                         <div class="small text-muted">{{ data_get($killmail, 'solar_system_name') ?: data_get($killmail, 'solar_system_id') }}</div>
@@ -1430,7 +1436,13 @@
                                         @endphp
                                         <tr>
                                             <td>
-                                                #{{ data_get($killmail, 'killmail_id') }}
+                                                @if(data_get($killmail, 'killmail_id'))
+                                                    <a href="https://zkillboard.com/kill/{{ data_get($killmail, 'killmail_id') }}/" target="_blank" rel="noopener noreferrer">
+                                                        #{{ data_get($killmail, 'killmail_id') }}
+                                                    </a>
+                                                @else
+                                                    Unknown killmail
+                                                @endif
                                                 <div class="small text-muted">{{ data_get($killmail, 'killmail_time') ?: 'Unknown time' }}</div>
                                                 @if(data_get($killmail, 'recency_bucket'))
                                                     <span class="badge badge-{{ data_get($killmail, 'recency_bucket') === 'recent' ? 'success' : 'secondary' }}">{{ ucfirst(data_get($killmail, 'recency_bucket')) }}</span>

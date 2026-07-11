@@ -1427,16 +1427,29 @@ class IntelReportRefresher
         }
 
         $monitoredEntityIds = $this->monitoredKillmailEntityIds()->flip();
-        $hostileEntityIds = $this->hostileKillmailEntityIds()->flip();
+        $hostileIds = $this->hostileKillmailEntityIds();
+
+        if ($hostileIds->isEmpty()) {
+            return;
+        }
+
+        $hostileEntityIds = $hostileIds->flip();
         $accountCharacterIds = $characterIds->map(fn ($id) => (int) $id)->flip();
 
         $rows = DB::table('killmail_attackers as monitored')
             ->join('killmail_attackers as other', 'other.killmail_id', '=', 'monitored.killmail_id')
+            ->join('killmail_attackers as hostile_actor', 'hostile_actor.killmail_id', '=', 'monitored.killmail_id')
             ->join('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id')
             ->whereIn('monitored.character_id', $characterIds->all())
+            ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'hostile_actor', $hostileIds))
             ->where(function ($query) {
                 $query->whereColumn('other.character_id', '!=', 'monitored.character_id')
                     ->orWhereNull('other.character_id');
+            })
+            ->where(function ($query) {
+                $query->whereColumn('other.character_id', '!=', 'hostile_actor.character_id')
+                    ->orWhereNull('other.character_id')
+                    ->orWhereNull('hostile_actor.character_id');
             })
             ->select([
                 'monitored.killmail_id',
@@ -1448,6 +1461,9 @@ class IntelReportRefresher
                 DB::raw('other.corporation_id as other_corporation_id'),
                 DB::raw('other.alliance_id as other_alliance_id'),
                 DB::raw('other.ship_type_id as other_ship_type_id'),
+                DB::raw('hostile_actor.character_id as hostile_actor_character_id'),
+                DB::raw('hostile_actor.corporation_id as hostile_actor_corporation_id'),
+                DB::raw('hostile_actor.alliance_id as hostile_actor_alliance_id'),
             ])
             ->get()
             ->filter(function ($row) use ($monitoredJoinDates, $accountMonitoredJoinDate, $accountCharacterIds, $monitoredEntityIds) {
@@ -1471,8 +1487,15 @@ class IntelReportRefresher
                     }
                 }
 
-                return $row->other_character_id || $row->other_corporation_id || $row->other_alliance_id;
+                return $this->isPlayerKillmailParty($row->other_character_id, $row->other_corporation_id, $row->other_alliance_id);
             })
+            ->unique(fn ($row) => implode(':', [
+                $row->killmail_id,
+                $row->monitored_character_id,
+                $row->other_character_id,
+                $row->other_corporation_id,
+                $row->other_alliance_id,
+            ]))
             ->values();
 
         if ($rows->isEmpty()) {
@@ -1550,13 +1573,15 @@ class IntelReportRefresher
             'category' => 'prejoin_killmail_cluster',
             'score' => $score,
             'title' => 'Repeated pre-join killmail activity with outside groups',
-            'details' => sprintf('%s has linked account characters repeatedly appearing on killmails with the same hostile or non-monitored same-side groups before joining a monitored group.', $user->name),
+            'details' => sprintf('%s has linked account characters repeatedly appearing on pre-join killmails with configured hostile attackers and the same non-NPC same-side group.', $user->name),
             'meta' => [
                 'cluster_count' => $clusters->count(),
                 'hostile_cluster_count' => $hostileClusterCount,
+                'requires_hostile_attacker' => true,
+                'npc_parties_ignored' => true,
                 'score_rule' => $hostileClusterCount > 0
-                    ? 'Repeated pre-join activity with configured hostile groups is scored higher than non-monitored outside groups.'
-                    : 'Repeated pre-join activity with the same non-monitored outside groups is scored as medium context.',
+                    ? 'Repeated pre-join activity on hostile killmails with configured hostile same-side groups is scored higher than non-monitored outside groups.'
+                    : 'Repeated pre-join activity on hostile killmails with the same non-monitored player group is scored as medium context.',
                 'clusters' => $clusters->take(10)->map(function ($cluster) use ($characterNames, $corporationNames, $allianceNames, $shipNames, $systemNames, $monitoredJoinDates, $accountMonitoredJoinDate) {
                     $entityType = data_get($cluster, 'entity_type');
                     $entityId = (int) data_get($cluster, 'entity_id');
@@ -1714,6 +1739,19 @@ class IntelReportRefresher
         return $query->whereIn($alias . '.character_id', $hostileIds->all())
             ->orWhereIn($alias . '.corporation_id', $hostileIds->all())
             ->orWhereIn($alias . '.alliance_id', $hostileIds->all());
+    }
+
+    private function isPlayerKillmailParty($characterId, $corporationId, $allianceId): bool
+    {
+        if ($allianceId) {
+            return true;
+        }
+
+        if ($corporationId && $this->isPlayerCorporationId((int) $corporationId)) {
+            return true;
+        }
+
+        return false;
     }
 
     private function killmailEvidenceSelects(string $monitoredAlias, string $hostileAlias, bool $hasKillmailDetails, string $monitoredSide, string $relationship, bool $hostilePartyIsAttacker): array
