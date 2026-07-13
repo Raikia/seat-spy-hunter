@@ -13,7 +13,7 @@ class EvidenceScoreGuide
         $hostileBase = $this->settings->hostileInteractionScore();
 
         return [
-            $this->row('hostile_employment_overlap', 'Hostile Employment Overlap', '2-100', 'Employment history overlap between account characters and current members of configured hostile groups.', '100 if both left the same corp within 10 days and that happened in the last 2 years. Older close departures score 20. 45 for same-time overlap in the last 2 years. 25 when both were in the same corp during the last 2 years but not at the same time. Otherwise capped at 10.'),
+            $this->row('hostile_employment_overlap', 'Hostile Employment Overlap', '2-100', 'Employment history overlap between account characters and current members of configured hostile groups.', '100 if the same monitored/hostile character pair left corporations within 10 days of each other 2+ times, regardless of age. A single recent close departure scores 50. Older one-off close departures score 20. 45 for same-time overlap in the last 2 years. 25 when both were in the same corp during the last 2 years but not at the same time. Otherwise capped at 10.'),
             $this->row('hostile_contacts', 'Hostile Contacts', sprintf('%d-40', min(40, $hostileBase + 2)), 'Positive standings toward configured hostile entities or entities marked negative by monitored groups.', sprintf('Base %d, plus 5 per extra match and +2/+5/+10 based on positive standing strength. Capped at 40.', $hostileBase)),
             $this->row('hostile_mail', 'Hostile Mail', '8-38', 'EVE mail between account characters and hostile entities.', 'Base 15 + 3 per interaction, +5 for outbound mail. Recent mail within 180 days adds 6. Evidence older than 2 years is halved.'),
             $this->row('hostile_wallet_direct', 'Direct Wallet Dealings', '10-42', 'Non-market wallet journal activity involving hostile entities.', 'Base 22 + 4 per direct journal match, +5 for outbound transfers. Recent activity within 180 days adds 6. Evidence older than 2 years is halved. Market transactions are excluded here.'),
@@ -67,7 +67,7 @@ class EvidenceScoreGuide
             ['rating' => 'Clear', 'range' => '0-24', 'class' => 'success', 'description' => 'Low score after mitigations and suppressions. Still review the evidence if confidence is low.'],
             ['rating' => 'Watch', 'range' => '25-49', 'class' => 'info', 'description' => 'Enough weak or contextual signals to keep an eye on the account.'],
             ['rating' => 'High', 'range' => '50-79', 'class' => 'warning', 'description' => 'Multiple meaningful signals or one strong signal. Director review is recommended.'],
-            ['rating' => 'Critical', 'range' => '80-100', 'class' => 'danger', 'description' => 'Very strong evidence, multiple high-value signals, or a 100-point close-departure employment overlap.'],
+            ['rating' => 'Critical', 'range' => '80-100', 'class' => 'danger', 'description' => 'Very strong evidence, multiple high-value signals, or repeated close-departure employment overlap with the same hostile character.'],
         ];
     }
 

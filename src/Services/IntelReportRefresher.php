@@ -1169,9 +1169,10 @@ class IntelReportRefresher
         $unknownAge = $overlaps->where('overlap_age_bucket', 'unknown');
         $closeDepartures = $overlaps->where('close_departure', true);
         $recentCloseDepartures = $closeDepartures->where('overlap_age_bucket', 'recent');
+        $repeatedCloseDeparturePairs = $this->repeatedCloseDeparturePairs($closeDepartures);
         $recentSameTime = $overlaps->filter(fn ($match) => data_get($match, 'same_time') && data_get($match, 'overlap_age_bucket') === 'recent');
         $recentDifferentTime = $overlaps->filter(fn ($match) => !data_get($match, 'same_time') && data_get($match, 'both_recent'));
-        $score = $this->employmentOverlapScore($overlaps, $closeDepartures, $recentCloseDepartures, $recentSameTime, $recentDifferentTime);
+        $score = $this->employmentOverlapScore($overlaps, $closeDepartures, $recentCloseDepartures, $repeatedCloseDeparturePairs, $recentSameTime, $recentDifferentTime);
 
         $evidence->push([
             'category' => 'hostile_employment_overlap',
@@ -1187,6 +1188,8 @@ class IntelReportRefresher
                 'different_time_count' => $overlaps->count() - $sameTime->count(),
                 'close_departure_count' => $closeDepartures->count(),
                 'recent_close_departure_count' => $recentCloseDepartures->count(),
+                'repeated_close_departure_pair_count' => $repeatedCloseDeparturePairs->count(),
+                'repeated_close_departure_match_count' => $repeatedCloseDeparturePairs->sum(fn ($matches) => $matches->count()),
                 'recent_same_time_count' => $recentSameTime->count(),
                 'recent_different_time_count' => $recentDifferentTime->count(),
                 'recent_count' => $recent->count(),
@@ -1200,10 +1203,25 @@ class IntelReportRefresher
         ]);
     }
 
-    private function employmentOverlapScore($overlaps, $closeDepartures, $recentCloseDepartures, $recentSameTime, $recentDifferentTime): int
+    private function repeatedCloseDeparturePairs($closeDepartures)
     {
-        if ($recentCloseDepartures->isNotEmpty()) {
+        return $closeDepartures
+            ->filter(fn ($match) => data_get($match, 'monitored_character_id') && data_get($match, 'hostile_character_id'))
+            ->groupBy(fn ($match) => sprintf('%s:%s',
+                data_get($match, 'monitored_character_id'),
+                data_get($match, 'hostile_character_id')
+            ))
+            ->filter(fn ($matches) => $matches->count() >= 2);
+    }
+
+    private function employmentOverlapScore($overlaps, $closeDepartures, $recentCloseDepartures, $repeatedCloseDeparturePairs, $recentSameTime, $recentDifferentTime): int
+    {
+        if ($repeatedCloseDeparturePairs->isNotEmpty()) {
             return 100;
+        }
+
+        if ($recentCloseDepartures->isNotEmpty()) {
+            return 50;
         }
 
         if ($recentSameTime->isNotEmpty()) {
@@ -1228,6 +1246,10 @@ class IntelReportRefresher
     private function employmentOverlapScoreRule(int $score): string
     {
         if ($score === 100) {
+            return 'The same monitored and hostile character pair left corporations within 10 days of each other more than once.';
+        }
+
+        if ($score === 50) {
             return 'Monitored and hostile characters left the same corporation within 10 days of each other in the last two years.';
         }
 

@@ -1502,8 +1502,9 @@
                         @endif
                         @if($evidence->category === 'hostile_employment_overlap' && !empty(data_get($evidence->meta, 'matches')))
                             <div class="mb-2">
+                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'repeated_close_departure_pair_count', data_get($evidence->meta, 'repeated_recent_close_departure_pair_count', 0)) }} repeated pairs</span>
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'close_departure_count', 0) }} close departures</span>
-                                <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_close_departure_count', 0) }} recent close departures</span>
+                                <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_close_departure_count', 0) }} recent close departures</span>
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'same_time_count', 0) }} same-time</span>
                                 <span class="badge badge-danger">{{ data_get($evidence->meta, 'recent_same_time_count', 0) }} recent same-time</span>
                                 <span class="badge badge-warning">{{ data_get($evidence->meta, 'recent_different_time_count', 0) }} recent same-corp</span>
