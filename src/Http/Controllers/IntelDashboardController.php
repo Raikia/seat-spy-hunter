@@ -21,8 +21,11 @@ class IntelDashboardController extends Controller
         $suppressed = $request->get('suppressed');
         $reviewStatus = $request->get('review_status', 'active');
         $evidenceCategories = $this->evidenceCategories();
+        $perPage = min(250, max(25, (int) $request->get('per_page', 100)));
+        $sort = $this->dashboardSort($request->get('sort'));
+        $order = $this->dashboardSortOrder($request->get('order'));
 
-        $reports = CharacterIntelReport::query()
+        $reportsQuery = CharacterIntelReport::query()
             ->with('evidence')
             ->with('suppressions')
             ->withCount(['evidence as total_evidence_count'])
@@ -62,11 +65,13 @@ class IntelDashboardController extends Controller
 
                     $inner->orWhere('user_id', $search);
                 });
-            })
-            ->orderByRaw("case review_status when 'escalated' then 0 when 'concerned' then 1 when 'watchlisted' then 2 else 3 end")
-            ->orderByDesc('score')
-            ->orderBy('character_name')
-            ->get();
+            });
+
+        $this->applyDashboardSort($reportsQuery, $sort, $order);
+
+        $reports = $reportsQuery
+            ->paginate($perPage)
+            ->withQueryString();
 
         $lastAnalyzedAt = CharacterIntelReport::query()->max('last_analyzed_at');
         $activeReports = CharacterIntelReport::query()
@@ -81,7 +86,52 @@ class IntelDashboardController extends Controller
             'last_analyzed_at' => $lastAnalyzedAt ? Carbon::parse($lastAnalyzedAt)->toDateTimeString() : null,
         ];
 
-        return view('seat-spy-hunter::index', compact('reports', 'summary', 'rating', 'search', 'evidenceCategory', 'evidenceCategories', 'suppressed', 'reviewStatus'));
+        return view('seat-spy-hunter::index', compact('reports', 'summary', 'rating', 'search', 'evidenceCategory', 'evidenceCategories', 'suppressed', 'reviewStatus', 'perPage', 'sort', 'order'));
+    }
+
+    private function dashboardSort(?string $sort): string
+    {
+        $allowed = [
+            'priority',
+            'user',
+            'group',
+            'risk',
+            'signals',
+            'hostile',
+            'ip',
+            'sp',
+            'updated',
+        ];
+
+        return in_array($sort, $allowed, true) ? $sort : 'priority';
+    }
+
+    private function dashboardSortOrder(?string $order): string
+    {
+        return in_array($order, ['asc', 'desc'], true) ? $order : 'desc';
+    }
+
+    private function applyDashboardSort($query, string $sort, string $order): void
+    {
+        if ($sort === 'priority') {
+            $query->orderByRaw("case review_status when 'escalated' then 0 when 'concerned' then 1 when 'watchlisted' then 2 else 3 end")
+                ->orderByDesc('score')
+                ->orderBy('character_name');
+
+            return;
+        }
+
+        match ($sort) {
+            'user' => $query->orderBy('character_name', $order)->orderBy('user_id', $order),
+            'group' => $query->orderBy('corporation_name', $order)->orderBy('alliance_name', $order)->orderBy('character_name'),
+            'risk' => $query->orderBy('score', $order)->orderBy('character_name'),
+            'signals' => $query->orderBy('evidence_count', $order)->orderBy('score', 'desc')->orderBy('character_name'),
+            'hostile' => $query->orderByRaw(sprintf('(hostile_contact_count + hostile_mail_count + hostile_wallet_count) %s', $order))->orderBy('score', 'desc')->orderBy('character_name'),
+            'ip' => $query->orderByRaw(sprintf('(shared_ip_user_count + vpn_ip_count) %s', $order))->orderBy('score', 'desc')->orderBy('character_name'),
+            'sp' => $query->orderBy('skillpoints', $order)->orderBy('character_name'),
+            'updated' => $query->orderBy('last_analyzed_at', $order)->orderBy('character_name'),
+            default => $query->orderByDesc('score')->orderBy('character_name'),
+        };
     }
 
     private function evidenceCategories(): array
@@ -97,6 +147,7 @@ class IntelDashboardController extends Controller
             'prejoin_monitored_lossmail' => 'Pre-Join Monitored Loss',
             'hostile_contract' => 'Hostile Contracts',
             'risk_confidence' => 'Risk Confidence',
+            'score_explanation' => 'Score Explanation',
             'new_evidence_since_review' => 'New Evidence Since Review',
             'suppressed_signals' => 'Suppressed Evidence',
             'esi_coverage_health' => 'ESI Coverage Health',
@@ -117,6 +168,9 @@ class IntelDashboardController extends Controller
             'age_skill_mismatch' => 'Age vs SP',
             'low_assets' => 'Low Assets',
             'low_asset_value' => 'Low Asset Value',
+            'thin_footprint_cap' => 'Thin Footprint Cap',
+            'late_token_after_join' => 'Late Token After Join',
+            'post_join_hostile_activity' => 'Post-Join Hostile Activity',
             'corporation_history_churn' => 'Corp Churn',
             'quiet_corporation_history' => 'Quiet Corp History',
             'recent_neutral_corporation_history' => 'Recent Outside Corp',

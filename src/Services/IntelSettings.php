@@ -45,7 +45,7 @@ class IntelSettings
 
     public function sharedIpScore(): int
     {
-        return self::DEFAULT_SHARED_IP_SCORE;
+        return $this->integer(self::SHARED_IP_SCORE, self::DEFAULT_SHARED_IP_SCORE, 0);
     }
 
     public function setSharedIpScore(int $value): void
@@ -65,7 +65,7 @@ class IntelSettings
 
     public function vpnScore(): int
     {
-        return self::DEFAULT_VPN_SCORE;
+        return $this->integer(self::VPN_SCORE, self::DEFAULT_VPN_SCORE, 0);
     }
 
     public function setVpnScore(int $value): void

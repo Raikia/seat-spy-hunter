@@ -4,6 +4,26 @@
 @section('page_header', 'Spy Hunter')
 
 @section('content')
+    @php
+        $sortLink = function (string $column) use ($sort, $order) {
+            $nextOrder = $sort === $column && $order === 'asc' ? 'desc' : 'asc';
+
+            return request()->fullUrlWithQuery([
+                'sort' => $column,
+                'order' => $nextOrder,
+                'page' => null,
+            ]);
+        };
+        $sortIcon = function (string $column) use ($sort, $order) {
+            if ($sort !== $column) {
+                return '<i class="fas fa-sort text-muted ml-1"></i>';
+            }
+
+            return $order === 'asc'
+                ? '<i class="fas fa-sort-up ml-1"></i>'
+                : '<i class="fas fa-sort-down ml-1"></i>';
+        };
+    @endphp
     <style>
         #spy-hunter-bulk-review-form .spy-hunter-bulk-status {
             min-width: 190px;
@@ -79,7 +99,9 @@
             </div>
 
             <form method="GET" action="{{ route('seat-spy-hunter.index') }}" class="form-row align-items-end">
-                <div class="form-group col-md-2">
+                <input type="hidden" name="sort" value="{{ $sort }}">
+                <input type="hidden" name="order" value="{{ $order }}">
+                <div class="form-group col-md-1">
                     <label for="rating">Risk</label>
                     <select name="rating" id="rating" class="form-control">
                         <option value="">Any</option>
@@ -116,6 +138,14 @@
                 <div class="form-group col-md-2">
                     <label for="search">Search</label>
                     <input type="text" name="search" id="search" value="{{ $search }}" class="form-control" placeholder="User account, user ID, corporation, alliance">
+                </div>
+                <div class="form-group col-md-1">
+                    <label for="per_page">Per Page</label>
+                    <select name="per_page" id="per_page" class="form-control">
+                        @foreach([25, 50, 100, 250] as $size)
+                            <option value="{{ $size }}" {{ (int) $perPage === $size ? 'selected' : '' }}>{{ $size }}</option>
+                        @endforeach
+                    </select>
                 </div>
                 <div class="form-group col-md-2">
                     <button type="submit" class="btn btn-secondary btn-block">
@@ -159,15 +189,31 @@
                             <th class="text-center">
                                 <input type="checkbox" id="spy-hunter-select-all" aria-label="Select all visible reports">
                             </th>
-                            <th>User Account</th>
+                            <th>
+                                <a href="{{ $sortLink('user') }}">User Account {!! $sortIcon('user') !!}</a>
+                            </th>
                             <th>Account Characters</th>
-                            <th>Primary Group</th>
-                            <th>Risk</th>
-                            <th>Signals</th>
-                            <th>Hostile</th>
-                            <th>IP</th>
-                            <th>Account SP</th>
-                            <th>Updated</th>
+                            <th>
+                                <a href="{{ $sortLink('group') }}">Primary Group {!! $sortIcon('group') !!}</a>
+                            </th>
+                            <th>
+                                <a href="{{ $sortLink('risk') }}">Risk {!! $sortIcon('risk') !!}</a>
+                            </th>
+                            <th>
+                                <a href="{{ $sortLink('signals') }}">Signals {!! $sortIcon('signals') !!}</a>
+                            </th>
+                            <th>
+                                <a href="{{ $sortLink('hostile') }}">Hostile {!! $sortIcon('hostile') !!}</a>
+                            </th>
+                            <th>
+                                <a href="{{ $sortLink('ip') }}">IP {!! $sortIcon('ip') !!}</a>
+                            </th>
+                            <th>
+                                <a href="{{ $sortLink('sp') }}">Account SP {!! $sortIcon('sp') !!}</a>
+                            </th>
+                            <th>
+                                <a href="{{ $sortLink('updated') }}">Updated {!! $sortIcon('updated') !!}</a>
+                            </th>
                             <th></th>
                         </tr>
                     </thead>
@@ -279,6 +325,16 @@
                     </tbody>
                 </table>
             </div>
+            @if(method_exists($reports, 'links'))
+                <div class="card-footer d-flex justify-content-between align-items-center flex-wrap">
+                    <div class="text-muted mb-2 mb-md-0">
+                        Showing {{ $reports->firstItem() ?: 0 }}-{{ $reports->lastItem() ?: 0 }} of {{ $reports->total() }} matching reports
+                    </div>
+                    <div>
+                        {{ $reports->links() }}
+                    </div>
+                </div>
+            @endif
         </div>
     </form>
 
@@ -290,25 +346,13 @@
 @push('javascript')
     <script>
         $(function () {
-            var reportsTable = $('#spy-hunter-reports-table').DataTable({
-                order: [[4, 'desc']],
-                pageLength: 50,
-                lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
-                language: {
-                    emptyTable: 'No account spy hunter reports match the selected filters.'
-                },
-                columnDefs: [
-                    { orderable: false, searchable: false, targets: [0, 10] }
-                ]
-            });
-
             function updateBulkReviewControls() {
                 var selectedCount = $('.spy-hunter-report-checkbox:checked').length;
 
                 $('#bulk_review_selected_count').text(selectedCount);
                 $('#bulk_review_submit').prop('disabled', selectedCount === 0);
 
-                var visibleCheckboxes = reportsTable.rows({ search: 'applied' }).nodes().to$().find('.spy-hunter-report-checkbox');
+                var visibleCheckboxes = $('#spy-hunter-reports-table .spy-hunter-report-checkbox');
                 var visibleSelectedCount = visibleCheckboxes.filter(':checked').length;
 
                 $('#spy-hunter-select-all')
@@ -317,15 +361,12 @@
             }
 
             $('#spy-hunter-select-all').on('change', function () {
-                reportsTable.rows({ search: 'applied' }).nodes().to$()
-                    .find('.spy-hunter-report-checkbox')
-                    .prop('checked', this.checked);
+                $('#spy-hunter-reports-table .spy-hunter-report-checkbox').prop('checked', this.checked);
 
                 updateBulkReviewControls();
             });
 
             $('#spy-hunter-reports-table').on('change', '.spy-hunter-report-checkbox', updateBulkReviewControls);
-            reportsTable.on('draw', updateBulkReviewControls);
 
             $('#spy-hunter-bulk-review-form').on('submit', function (event) {
                 if ($('.spy-hunter-report-checkbox:checked').length === 0) {

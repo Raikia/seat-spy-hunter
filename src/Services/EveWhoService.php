@@ -169,12 +169,7 @@ class EveWhoService
             return collect();
         }
 
-        $hostileCharacterIds = EveWhoMember::query()
-            ->whereNotIn('character_id', $characterIds->all())
-            ->pluck('character_id')
-            ->filter()
-            ->unique()
-            ->values();
+        $hostileCharacterIds = $this->hostileCharacterIdsWithCorporationHistory($characterIds, $corporationIds);
 
         if ($hostileCharacterIds->isEmpty()) {
             return collect();
@@ -323,15 +318,44 @@ class EveWhoService
         return $this->employmentHistories($characterIds);
     }
 
+    private function hostileCharacterIdsWithCorporationHistory(Collection $excludedCharacterIds, Collection $corporationIds): Collection
+    {
+        if ($corporationIds->isEmpty()
+            || !Schema::hasTable('character_corporation_histories')
+            || !Schema::hasColumn('character_corporation_histories', 'character_id')
+            || !Schema::hasColumn('character_corporation_histories', 'corporation_id')) {
+            return collect();
+        }
+
+        $historyTable = 'character_corporation_histories';
+
+        return EveWhoMember::query()
+            ->whereNotNull('character_id')
+            ->whereNotIn('character_id', $excludedCharacterIds->all())
+            ->whereIn('character_id', function ($query) use ($historyTable, $corporationIds) {
+                $query->select('character_id')
+                    ->from($historyTable)
+                    ->whereIn('corporation_id', $corporationIds->all())
+                    ->when(Schema::hasColumn($historyTable, 'is_deleted'), fn ($inner) => $inner->where('is_deleted', false));
+            })
+            ->pluck('character_id')
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
     private function employmentHistories(Collection $characterIds, ?Collection $corporationIds = null): Collection
     {
-        if (!Schema::hasTable('character_corporation_histories')) {
+        if (!Schema::hasTable('character_corporation_histories')
+            || !Schema::hasColumn('character_corporation_histories', 'character_id')
+            || !Schema::hasColumn('character_corporation_histories', 'corporation_id')
+            || !Schema::hasColumn('character_corporation_histories', 'start_date')) {
             return collect();
         }
 
         $query = DB::table('character_corporation_histories')
             ->whereIn('character_id', $characterIds->all())
-            ->where('is_deleted', false)
+            ->when(Schema::hasColumn('character_corporation_histories', 'is_deleted'), fn ($inner) => $inner->where('is_deleted', false))
             ->orderBy('character_id')
             ->orderByDesc('start_date');
 

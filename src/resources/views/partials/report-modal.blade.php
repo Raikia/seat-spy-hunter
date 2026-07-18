@@ -35,7 +35,11 @@
         'prejoin_monitored_lossmail' => 'Pre-Join Monitored Loss',
         'hostile_contract' => 'Hostile Contract',
         'risk_confidence' => 'Risk Confidence',
+        'score_explanation' => 'Score Explanation',
         'new_evidence_since_review' => 'New Evidence',
+        'thin_footprint_cap' => 'Thin Footprint Cap',
+        'late_token_after_join' => 'Late Token After Join',
+        'post_join_hostile_activity' => 'Post-Join Hostile Activity',
         'shared_ip' => 'Shared IP',
         'vpn_ip' => 'VPN / Proxy',
         'missing_token' => 'Missing Token',
@@ -83,7 +87,11 @@
         'prejoin_monitored_lossmail' => 'info',
         'hostile_contract' => 'danger',
         'risk_confidence' => 'primary',
+        'score_explanation' => 'primary',
         'new_evidence_since_review' => 'primary',
+        'thin_footprint_cap' => 'success',
+        'late_token_after_join' => 'info',
+        'post_join_hostile_activity' => 'warning',
         'shared_ip' => 'warning',
         'vpn_ip' => 'warning',
         'missing_token' => 'dark',
@@ -106,48 +114,6 @@
 
         return '<a href="' . route('seatcore::character.view.sheet', ['character' => $characterId]) . '" target="_blank" rel="noopener noreferrer">' . e($label ?: $characterId) . '</a>';
     };
-    $employmentOverlapCorporationIds = $report->evidence
-        ->where('category', 'hostile_employment_overlap')
-        ->flatMap(fn($row) => collect(data_get($row->meta, 'matches', []))->pluck('corporation_id'))
-        ->filter()
-        ->map(fn($id) => (int) $id)
-        ->unique()
-        ->values();
-    $employmentOverlapCorporationNames = collect();
-
-    if ($employmentOverlapCorporationIds->isNotEmpty()) {
-        if (\Illuminate\Support\Facades\Schema::hasTable('corporation_infos')) {
-            $employmentOverlapCorporationNames = $employmentOverlapCorporationNames->union(
-                \Illuminate\Support\Facades\DB::table('corporation_infos')
-                    ->whereIn('corporation_id', $employmentOverlapCorporationIds->all())
-                    ->pluck('name', 'corporation_id')
-            );
-        }
-
-        $missingEmploymentCorporationIds = $employmentOverlapCorporationIds
-            ->reject(fn($id) => $employmentOverlapCorporationNames->has((int) $id))
-            ->values();
-
-        if ($missingEmploymentCorporationIds->isNotEmpty() && \Illuminate\Support\Facades\Schema::hasTable('universe_names')) {
-            $employmentOverlapCorporationNames = $employmentOverlapCorporationNames->union(
-                \Illuminate\Support\Facades\DB::table('universe_names')
-                    ->whereIn('entity_id', $missingEmploymentCorporationIds->all())
-                    ->pluck('name', 'entity_id')
-            );
-        }
-
-        $missingEmploymentCorporationIds = $employmentOverlapCorporationIds
-            ->reject(fn($id) => $employmentOverlapCorporationNames->has((int) $id))
-            ->values();
-
-        if ($missingEmploymentCorporationIds->isNotEmpty() && \Illuminate\Support\Facades\Schema::hasTable('invNames')) {
-            $employmentOverlapCorporationNames = $employmentOverlapCorporationNames->union(
-                \Illuminate\Support\Facades\DB::table('invNames')
-                    ->whereIn('itemID', $missingEmploymentCorporationIds->all())
-                    ->pluck('itemName', 'itemID')
-            );
-        }
-    }
     $scoreBadge = function ($score, $fallback = 'secondary') {
         $score = (int) $score;
 
@@ -289,11 +255,12 @@
                         $scoreEvidence = $report->evidence->filter(fn($row) => (int) $row->score > 0)->sortByDesc('score')->values();
                         $scoreSubtotal = (int) $scoreEvidence->sum('score');
                         $mitigationEvidence = $report->evidence
+                            ->reject(fn($row) => $row->category === 'score_explanation')
                             ->filter(fn($row) => (int) data_get($row->meta, 'mitigation_score', 0) > 0)
                             ->values();
                         $mitigationTotal = (int) $mitigationEvidence->sum(fn($row) => (int) data_get($row->meta, 'mitigation_score', 0));
                         $scoreAfterMitigation = max(0, $scoreSubtotal - $mitigationTotal);
-                        $nonScoringEvidenceCount = $report->evidence->filter(fn($row) => (int) $row->score === 0 && (int) data_get($row->meta, 'mitigation_score', 0) === 0)->count();
+                        $nonScoringEvidenceCount = $report->evidence->filter(fn($row) => (int) $row->score === 0 && ($row->category === 'score_explanation' || (int) data_get($row->meta, 'mitigation_score', 0) === 0))->count();
                     @endphp
 
                     <div class="border rounded p-3 mb-3">
@@ -1549,7 +1516,7 @@
                                                 </div>
                                             </td>
                                             <td>
-                                                {{ data_get($match, 'corporation_name') ?: $employmentOverlapCorporationNames->get((int) data_get($match, 'corporation_id')) ?: data_get($match, 'corporation_id') }}
+                                                {{ data_get($match, 'corporation_name') ?: data_get($match, 'corporation_id') }}
                                                 <div class="small text-muted">{{ data_get($match, 'corporation_id') }}</div>
                                                 @if(data_get($match, 'alliance_name') || data_get($match, 'alliance_id'))
                                                     <div class="small text-muted">

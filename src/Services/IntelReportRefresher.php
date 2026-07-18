@@ -76,11 +76,19 @@ class IntelReportRefresher
                     $characterEvidence = $this->accountScopedCharacterEvidence($analyses, $monitoredCharacterIds);
                     $accountEvidence = $this->accountEvidence($user, $scoredCharacters, $hostileEntityIds);
                     $evidence = $characterEvidence->merge($accountEvidence)->values();
+                    $this->addLateTokenAfterJoinEvidence($user, $scoredCharacters, $evidence);
                     $suppressedCategories = $this->suppressedCategories((int) $user->id);
                     $suppressedEvidence = $evidence->filter(fn ($row) => $suppressedCategories->has($row['category']))->values();
                     $evidence = $evidence->reject(fn ($row) => $suppressedCategories->has($row['category']))->values();
+                    $this->addPostJoinHostileActivityEvidence($user, $evidence);
+                    $derivedSuppressedEvidence = $evidence->filter(fn ($row) => $suppressedCategories->has($row['category']))->values();
+                    if ($derivedSuppressedEvidence->isNotEmpty()) {
+                        $suppressedEvidence = $suppressedEvidence->merge($derivedSuppressedEvidence)->values();
+                        $evidence = $evidence->reject(fn ($row) => $suppressedCategories->has($row['category']))->values();
+                    }
+                    $evidence = $this->applyEvidenceFamilyCaps($evidence);
                     $metrics = $this->accountMetrics($analyses);
-                    $mitigation = $accountEvidence->sum(fn ($row) => (int) data_get($row, 'meta.mitigation_score', 0));
+                    $mitigation = $evidence->sum(fn ($row) => (int) data_get($row, 'meta.mitigation_score', 0));
                     $score = min(100, max(0, (int) $evidence->sum('score') - $mitigation));
                     $primaryCharacter = $this->primaryCharacter($user, $scoredCharacters);
                     $affiliation = optional($primaryCharacter)->affiliation;
@@ -92,8 +100,13 @@ class IntelReportRefresher
                         $evidence->push($newEvidenceSinceReview);
                     }
 
+                    $scoreExplanation = $this->scoreExplanationEvidence($user, $evidence, $score, $mitigation, $suppressedEvidence);
+                    if ($scoreExplanation) {
+                        $evidence->push($scoreExplanation);
+                    }
+
                     $riskSignalCount = $evidence
-                        ->reject(fn ($row) => in_array($row['category'], ['account_connectors', 'multi_character_account', 'new_evidence_since_review']))
+                        ->reject(fn ($row) => in_array($row['category'], ['account_connectors', 'multi_character_account', 'new_evidence_since_review', 'score_explanation', 'thin_footprint_cap']))
                         ->where('score', '>', 0)
                         ->count();
 
@@ -199,6 +212,10 @@ class IntelReportRefresher
         $query = CharacterIntelReport::query();
 
         if ($userIds->isEmpty()) {
+            if ($this->hasConfiguredMonitoredEntities()) {
+                return;
+            }
+
             $query->delete();
 
             return;
@@ -214,6 +231,14 @@ class IntelReportRefresher
         }
 
         $query->delete();
+    }
+
+    private function hasConfiguredMonitoredEntities(): bool
+    {
+        return IntelEntity::query()
+            ->where('category', IntelEntity::CATEGORY_MONITORED)
+            ->whereIn('entity_type', ['corporation', 'alliance'])
+            ->exists();
     }
 
     private function reportQueryForAccount(int $userId)
@@ -367,6 +392,214 @@ class IntelReportRefresher
         ksort($meta);
 
         return $meta;
+    }
+
+    private function addLateTokenAfterJoinEvidence(User $user, $characters, $evidence): void
+    {
+        $characterIds = $characters->pluck('character_id')->map(fn ($id) => (int) $id)->filter()->values();
+        if ($characterIds->isEmpty()) {
+            return;
+        }
+
+        $joinDates = $this->monitoredGroupJoinDates($characterIds);
+        $accountJoinDate = $joinDates->filter()->sort()->first();
+
+        if (!$accountJoinDate) {
+            return;
+        }
+
+        $charactersById = $characters->keyBy('character_id');
+        $tokens = RefreshToken::withTrashed()
+            ->whereIn('character_id', $characterIds->all())
+            ->whereNotNull('created_at')
+            ->get(['character_id', 'created_at', 'deleted_at']);
+
+        $matches = $tokens
+            ->map(function ($token) use ($joinDates, $accountJoinDate, $charactersById) {
+                $characterId = (int) $token->character_id;
+                $joinDate = $joinDates->get($characterId) ?: $accountJoinDate;
+
+                if (!$joinDate || !$token->created_at || strtotime((string) $token->created_at) <= strtotime((string) $joinDate) + 86400) {
+                    return null;
+                }
+
+                $character = $charactersById->get($characterId);
+
+                return [
+                    'character_id' => $characterId,
+                    'character_name' => optional($character)->name,
+                    'token_created_at' => $this->dateString($token->created_at),
+                    'monitored_group_joined_at' => $this->dateString($joinDate),
+                    'deleted_at' => $this->dateString($token->deleted_at),
+                ];
+            })
+            ->filter()
+            ->values();
+
+        if ($matches->isEmpty()) {
+            return;
+        }
+
+        $evidence->push([
+            'category' => 'late_token_after_join',
+            'score' => 8,
+            'title' => 'Token added after monitored join',
+            'details' => sprintf('%s has linked character tokens added after the account was already represented in a monitored group.', $user->name),
+            'meta' => [
+                'score_rule' => 'Small context signal: post-join token timing can mean an alt was added later for visibility, but it can also be normal account maintenance.',
+                'account_monitored_group_joined_at' => $this->dateString($accountJoinDate),
+                'match_count' => $matches->count(),
+                'matches' => $matches->all(),
+            ],
+        ]);
+    }
+
+    private function addPostJoinHostileActivityEvidence(User $user, $evidence): void
+    {
+        $timedCategories = [
+            'hostile_mail',
+            'hostile_wallet_direct',
+            'hostile_market_transaction',
+            'hostile_contract',
+        ];
+
+        $characterIds = collect($evidence)
+            ->pluck('meta.source_character_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($characterIds->isEmpty()) {
+            return;
+        }
+
+        $joinDates = $this->monitoredGroupJoinDates($characterIds);
+        $accountJoinDate = $joinDates->filter()->sort()->first();
+
+        if (!$accountJoinDate) {
+            return;
+        }
+
+        $matches = collect($evidence)
+            ->filter(fn ($row) => in_array($row['category'] ?? null, $timedCategories, true))
+            ->map(function ($row) use ($joinDates, $accountJoinDate) {
+                $meta = $row['meta'] ?? [];
+                $characterId = (int) data_get($meta, 'source_character_id');
+                $activityAt = data_get($meta, 'latest_interaction_at') ?: data_get($meta, 'latest_contract_at');
+                $joinDate = $characterId ? ($joinDates->get($characterId) ?: $accountJoinDate) : $accountJoinDate;
+
+                if (!$activityAt || !$joinDate || strtotime((string) $activityAt) <= strtotime((string) $joinDate)) {
+                    return null;
+                }
+
+                return [
+                    'category' => $row['category'],
+                    'title' => $row['title'],
+                    'score' => (int) ($row['score'] ?? 0),
+                    'source_character_id' => $characterId ?: null,
+                    'source_character_name' => data_get($meta, 'source_character_name'),
+                    'latest_activity_at' => $this->dateString($activityAt),
+                    'monitored_group_joined_at' => $this->dateString($joinDate),
+                ];
+            })
+            ->filter()
+            ->values();
+
+        if ($matches->isEmpty()) {
+            return;
+        }
+
+        $evidence->push([
+            'category' => 'post_join_hostile_activity',
+            'score' => 12,
+            'title' => 'Hostile activity after monitored join',
+            'details' => sprintf('%s has hostile activity dated after the account was represented in a monitored group.', $user->name),
+            'meta' => [
+                'score_rule' => 'Timing context signal: hostile interactions after joining are more relevant than old pre-join history.',
+                'match_count' => $matches->count(),
+                'matches' => $matches->take(10)->all(),
+            ],
+        ]);
+    }
+
+    private function applyEvidenceFamilyCaps($evidence)
+    {
+        $thinFootprintCategories = [
+            'no_pve_wallet_history',
+            'limited_recent_wallet_activity',
+            'stable_wallet_balance',
+            'thin_seat_footprint',
+            'no_productive_footprint',
+            'no_saved_fittings',
+            'no_lossmails',
+            'low_loyalty_points',
+            'low_assets',
+            'low_asset_value',
+            'sparse_activity',
+            'few_trained_skills',
+            'age_skill_mismatch',
+            'low_account_skillpoints',
+            'low_skills',
+        ];
+        $cap = 35;
+        $familyRows = collect($evidence)
+            ->filter(fn ($row) => in_array($row['category'] ?? null, $thinFootprintCategories, true))
+            ->where('score', '>', 0)
+            ->values();
+        $familyScore = (int) $familyRows->sum('score');
+
+        if ($familyScore <= $cap) {
+            return $evidence;
+        }
+
+        $mitigation = $familyScore - $cap;
+        $evidence->push([
+            'category' => 'thin_footprint_cap',
+            'score' => 0,
+            'title' => 'Thin footprint score cap',
+            'details' => sprintf('Thin-footprint style signals scored %d points before capping, so %d points were removed to avoid over-counting quiet-account evidence.', $familyScore, $mitigation),
+            'meta' => [
+                'family' => 'thin_footprint',
+                'family_score_before_cap' => $familyScore,
+                'family_cap' => $cap,
+                'mitigation_score' => $mitigation,
+                'categories' => $familyRows->pluck('category')->unique()->values()->all(),
+            ],
+        ]);
+
+        return $evidence;
+    }
+
+    private function scoreExplanationEvidence(User $user, $evidence, int $score, int $mitigation, $suppressedEvidence): array
+    {
+        $ignoredCategories = ['account_characters', 'account_connectors', 'new_evidence_since_review', 'suppressed_signals', 'score_explanation'];
+        $topDrivers = collect($evidence)
+            ->reject(fn ($row) => in_array($row['category'] ?? null, $ignoredCategories, true))
+            ->where('score', '>', 0)
+            ->sortByDesc('score')
+            ->take(3)
+            ->map(fn ($row) => [
+                'category' => $row['category'],
+                'title' => $row['title'],
+                'score' => (int) ($row['score'] ?? 0),
+            ])
+            ->values();
+
+        return [
+            'category' => 'score_explanation',
+            'score' => 0,
+            'title' => 'Score explanation',
+            'details' => sprintf('%s is currently scored at %d/100. The top contributing evidence is shown here for quick review.', $user->name, $score),
+            'meta' => [
+                'final_score' => $score,
+                'rating' => RiskRating::fromScore($score),
+                'positive_evidence_score' => (int) collect($evidence)->sum('score'),
+                'total_mitigation_score' => $mitigation,
+                'suppressed_count' => collect($suppressedEvidence)->count(),
+                'top_drivers' => $topDrivers->all(),
+            ],
+        ];
     }
 
     private function accountScopedCharacterEvidence($analyses, $monitoredCharacterIds)
@@ -1172,6 +1405,8 @@ class IntelReportRefresher
         $repeatedCloseDeparturePairs = $this->repeatedCloseDeparturePairs($closeDepartures);
         $recentSameTime = $overlaps->filter(fn ($match) => data_get($match, 'same_time') && data_get($match, 'overlap_age_bucket') === 'recent');
         $recentDifferentTime = $overlaps->filter(fn ($match) => !data_get($match, 'same_time') && data_get($match, 'both_recent'));
+        $uniquePairCount = $this->employmentUniquePairCount($overlaps);
+        $uniqueCorporationCount = $overlaps->pluck('corporation_id')->filter()->unique()->count();
         $score = $this->employmentOverlapScore($overlaps, $closeDepartures, $recentCloseDepartures, $repeatedCloseDeparturePairs, $recentSameTime, $recentDifferentTime);
 
         $evidence->push([
@@ -1192,6 +1427,8 @@ class IntelReportRefresher
                 'repeated_close_departure_match_count' => $repeatedCloseDeparturePairs->sum(fn ($matches) => $matches->count()),
                 'recent_same_time_count' => $recentSameTime->count(),
                 'recent_different_time_count' => $recentDifferentTime->count(),
+                'unique_pair_count' => $uniquePairCount,
+                'unique_corporation_count' => $uniqueCorporationCount,
                 'recent_count' => $recent->count(),
                 'aging_count' => $aging->count(),
                 'old_count' => $old->count(),
@@ -1240,7 +1477,19 @@ class IntelReportRefresher
             return 10;
         }
 
-        return min(10, max(2, $overlaps->count()));
+        return min(10, max(2, max($this->employmentUniquePairCount($overlaps), $overlaps->pluck('corporation_id')->filter()->unique()->count())));
+    }
+
+    private function employmentUniquePairCount($overlaps): int
+    {
+        return $overlaps
+            ->map(fn ($match) => sprintf('%s:%s',
+                data_get($match, 'character_id') ?: data_get($match, 'monitored_character_id'),
+                data_get($match, 'hostile_character_id')
+            ))
+            ->filter(fn ($pair) => $pair !== ':')
+            ->unique()
+            ->count();
     }
 
     private function employmentOverlapScoreRule(int $score): string
@@ -1675,11 +1924,25 @@ class IntelReportRefresher
             return;
         }
 
+        $preJoinCutoffs = $characterIds
+            ->mapWithKeys(fn ($characterId) => [
+                (int) $characterId => $monitoredJoinDates->get((int) $characterId) ?: $accountMonitoredJoinDate,
+            ])
+            ->filter()
+            ->map(fn ($date) => (string) $date);
+
         $matches = DB::table('killmail_victims as monitored')
             ->join('killmail_attackers as attacker', 'attacker.killmail_id', '=', 'monitored.killmail_id')
             ->join('killmail_details as details', 'details.killmail_id', '=', 'monitored.killmail_id')
             ->whereIn('monitored.character_id', $characterIds->all())
-            ->where('details.killmail_time', '<', $accountMonitoredJoinDate)
+            ->where(function ($query) use ($preJoinCutoffs) {
+                foreach ($preJoinCutoffs as $characterId => $joinDate) {
+                    $query->orWhere(function ($inner) use ($characterId, $joinDate) {
+                        $inner->where('monitored.character_id', (int) $characterId)
+                            ->where('details.killmail_time', '<', $joinDate);
+                    });
+                }
+            })
             ->where(fn ($query) => $this->whereHostileKillmailParty($query, 'attacker', $monitoredEntityIds))
             ->where(function ($query) {
                 $query->whereColumn('attacker.character_id', '!=', 'monitored.character_id')

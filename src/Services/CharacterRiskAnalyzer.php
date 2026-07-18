@@ -377,7 +377,7 @@ class CharacterRiskAnalyzer
             if ($sharedUserIds->isNotEmpty()) {
                 $evidence->push([
                     'category' => 'shared_ip',
-                    'score' => 30,
+                    'score' => $this->settings->sharedIpScore(),
                     'title' => 'Shares login IPs with other SeAT users',
                     'details' => sprintf('%s has used IP addresses also seen on %d other SeAT user account%s.',
                         $character->name,
@@ -389,6 +389,7 @@ class CharacterRiskAnalyzer
                         'ip_count' => $ips->count(),
                         'ips' => $ips->take(10)->values()->all(),
                         'shared_users' => $sharedUsers,
+                        'configured_score' => $this->settings->sharedIpScore(),
                     ],
                 ]);
             }
@@ -404,7 +405,7 @@ class CharacterRiskAnalyzer
 
             $evidence->push([
                 'category' => 'vpn_ip',
-                'score' => 20,
+                'score' => $this->settings->vpnScore(),
                 'title' => 'Uses IPs marked as VPN/proxy/hosting',
                 'details' => sprintf('%s has login IP intelligence matches: %s.', $character->name, $labels),
                 'meta' => [
@@ -420,6 +421,7 @@ class CharacterRiskAnalyzer
                             'checked_at' => $this->dateTimeString($record->checked_at),
                         ];
                     })->values()->all(),
+                    'configured_score' => $this->settings->vpnScore(),
                 ],
             ]);
         }
