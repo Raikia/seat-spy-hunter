@@ -34,13 +34,13 @@ Current signals include:
 
 Spy Hunter uses EveWho only to discover who is currently in configured hostile corporations or alliances.
 
-After it finds those hostile members, it queues SeAT's normal ESI character jobs. Corporation-history comparison is then done from SeAT's own `character_corporation_histories` data.
+After it finds those hostile members, it trickles SeAT's public corporation-history ESI job for those characters. Corporation-history comparison is then done from SeAT's own `character_corporation_histories` data.
 
 That means the useful chain is:
 
 1. Configure hostile corporations or alliances in Spy Hunter settings.
 2. Let the EveWho queue discover current hostile members.
-3. Let SeAT's normal ESI jobs pull corporation history for those members.
+3. Let the Spy Hunter ESI trickle job pull corporation history for those members.
 4. Refresh Spy Hunter reports.
 5. Review any employment overlap evidence.
 
@@ -125,19 +125,21 @@ docker compose restart scheduler
 
 ## Scheduled Jobs
 
-The plugin ships a schedule seeder for three commands:
+The plugin ships a schedule seeder for four commands:
 
 - `seat-spy-hunter:refresh`
 - `seat-spy-hunter:vpn-lookup --limit=1000`
 - `seat-spy-hunter:evewho-sync --limit=10`
+- `seat-spy-hunter:evewho-esi-refresh --limit=5`
 
 The default intent is:
 
-- Queue a report refresh every two hours.
+- Queue a report refresh once per day.
 - Process VPNAPI.io lookups once per day, shortly after the UTC reset.
-- Process EveWho hostile member pages every five minutes, while throttling each hostile member's SeAT ESI refresh to about once per month.
+- Process EveWho hostile member pages every five minutes.
+- Queue up to 5 stale hostile-member corporation-history ESI refreshes every 15 minutes, while throttling each member to about once per month.
 
-The cache page also has a button to force that monthly hostile-member ESI refresh early. It queues a background job that processes cached members in small delayed batches, and should be used sparingly, mostly after adding a new hostile group or when you know stale employment data needs to be refreshed.
+The cache page also has a button to force that monthly hostile-member ESI refresh early. It queues a background job that processes cached members in small delayed batches of 10 members every 5 minutes, and should be used sparingly, mostly after adding a new hostile group or when you know stale employment data needs to be refreshed.
 
 Report refreshes run as Laravel queue jobs. The dashboard refresh button and the scheduled command both enqueue the same unique job, so the web request and scheduler return quickly while the SeAT worker does the analysis.
 
@@ -147,6 +149,7 @@ You can also run the commands manually:
 php artisan seat-spy-hunter:refresh
 php artisan seat-spy-hunter:vpn-lookup --limit=1000
 php artisan seat-spy-hunter:evewho-sync --limit=10
+php artisan seat-spy-hunter:evewho-esi-refresh --limit=5
 ```
 
 In Docker:
@@ -155,6 +158,7 @@ In Docker:
 docker compose exec front php artisan seat-spy-hunter:refresh
 docker compose exec front php artisan seat-spy-hunter:vpn-lookup --limit=1000
 docker compose exec front php artisan seat-spy-hunter:evewho-sync --limit=10
+docker compose exec front php artisan seat-spy-hunter:evewho-esi-refresh --limit=5
 ```
 
 ## First Setup

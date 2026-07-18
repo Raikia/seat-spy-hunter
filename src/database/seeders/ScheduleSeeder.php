@@ -33,6 +33,14 @@ class ScheduleSeeder extends AbstractScheduleSeeder
                 'ping_before' => null,
                 'ping_after' => null,
             ],
+            [
+                'command' => 'seat-spy-hunter:evewho-esi-refresh --limit=5',
+                'expression' => '3,18,33,48 * * * *',
+                'allow_overlap' => false,
+                'allow_maintenance' => false,
+                'ping_before' => null,
+                'ping_after' => null,
+            ],
         ];
     }
 
@@ -42,6 +50,7 @@ class ScheduleSeeder extends AbstractScheduleSeeder
             'seat-intel:refresh',
             'seat-intel:vpn-lookup --limit=1000',
             'seat-intel:evewho-sync --limit=10',
+            'seat-intel:evewho-esi-refresh --limit=5',
         ];
     }
 }

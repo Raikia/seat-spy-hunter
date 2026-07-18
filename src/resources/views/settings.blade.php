@@ -341,10 +341,11 @@
                         <div class="col-md-6 mb-3">
                             <div class="border rounded p-3 h-100">
                                 <h6>EveWho</h6>
-                                <div class="small text-muted mb-2">Scheduled every 5 minutes, 10 hostile member-list pages per run. Newly discovered members queue SeAT ESI character jobs for corporation history.</div>
+                                <div class="small text-muted mb-2">Member lists sync every 5 minutes, 10 EveWho pages per run. Corporation-history ESI is queued separately at 5 stale members every 15 minutes.</div>
                                 <div class="d-flex justify-content-between"><span>Pending</span><strong>{{ $eveWhoQueueSummary->get('pending', 0) }}</strong></div>
                                 <div class="d-flex justify-content-between"><span>Complete</span><strong>{{ $eveWhoQueueSummary->get('complete', 0) }}</strong></div>
                                 <code class="small d-block mt-2">php artisan seat-spy-hunter:evewho-sync --limit=10</code>
+                                <code class="small d-block mt-1">php artisan seat-spy-hunter:evewho-esi-refresh --limit=5</code>
                             </div>
                         </div>
                     </div>

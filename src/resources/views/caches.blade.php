@@ -199,7 +199,7 @@
         </div>
         <div class="card-body">
             <div class="alert alert-info">
-                EveWho is only used here to cache current hostile corporation or alliance members. Corporation history comes from SeAT's normal ESI character jobs after those members are discovered. Hostile-member ESI refreshes are throttled to roughly once per month per character unless you force a refresh; forced refreshes run in small delayed batches.
+                EveWho is only used here to cache current hostile corporation or alliance members. Corporation history comes from SeAT's public CorporationHistory ESI job after those members are discovered. Normal refreshes trickle 5 stale members every 15 minutes and only requeue a member about once per month; forced refreshes run 10 members every 5 minutes.
             </div>
             <form method="GET" action="{{ route('seat-spy-hunter.caches') }}" class="form-row align-items-end mb-3">
                 <div class="form-group col-md-9">

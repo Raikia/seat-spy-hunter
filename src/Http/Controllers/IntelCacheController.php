@@ -138,7 +138,7 @@ class IntelCacheController extends Controller
     {
         RefreshEveWhoMemberEsiJob::dispatch(true);
 
-        return redirect()->route('seat-spy-hunter.caches')->with('success', 'Monthly EveWho member ESI refresh queued in batches. The worker will process a small group, pause, then continue in the background.');
+        return redirect()->route('seat-spy-hunter.caches')->with('success', 'Monthly EveWho member ESI refresh queued in throttled batches. The worker will queue 10 corporation-history refreshes, pause 5 minutes, then continue in the background.');
     }
 
     public function destroyEveWhoCache()

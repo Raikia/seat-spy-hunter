@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Schema;
 use Raikia\SeatSpyHunter\Models\EveWhoMember;
 use Raikia\SeatSpyHunter\Models\EveWhoQueue;
 use Raikia\SeatSpyHunter\Models\IntelEntity;
-use Seat\Eveapi\Bus\Character as CharacterBus;
+use Seat\Eveapi\Jobs\Character\CorporationHistory;
 
 class EveWhoService
 {
@@ -68,11 +68,7 @@ class EveWhoService
 
             $characters = $this->charactersFromListPayload($payload);
             foreach ($characters as $character) {
-                $member = $this->cacheCurrentMember($character, $row->entity_type, (int) $row->entity_id);
-
-                if ($member) {
-                    $this->queueMemberEsi($member);
-                }
+                $this->cacheCurrentMember($character, $row->entity_type, (int) $row->entity_id);
             }
 
             $pagination = data_get($payload, 'pagination', []);
@@ -106,6 +102,7 @@ class EveWhoService
 
         $members = EveWhoMember::query()
             ->whereNotNull('character_id')
+            ->whereIn('id', $this->canonicalEveWhoMemberIds())
             ->where('id', '>', $afterId)
             ->when(!$force, function ($query) {
                 $query->where(function ($inner) {
@@ -127,6 +124,7 @@ class EveWhoService
 
         $hasMore = $lastId !== null && EveWhoMember::query()
             ->whereNotNull('character_id')
+            ->whereIn('id', $this->canonicalEveWhoMemberIds())
             ->where('id', '>', $lastId)
             ->when(!$force, function ($query) {
                 $query->where(function ($inner) {
@@ -141,6 +139,14 @@ class EveWhoService
             'last_id' => $lastId,
             'has_more' => $hasMore,
         ];
+    }
+
+    private function canonicalEveWhoMemberIds()
+    {
+        return DB::table((new EveWhoMember())->getTable())
+            ->selectRaw('MIN(id)')
+            ->whereNotNull('character_id')
+            ->groupBy('character_id');
     }
 
     public function hostileEmploymentOverlaps(Collection $characterIds): Collection
@@ -293,8 +299,10 @@ class EveWhoService
         }
 
         try {
-            (new CharacterBus((int) $member->character_id))->fire();
-            $member->forceFill(['esi_queued_at' => now()])->save();
+            CorporationHistory::dispatch((int) $member->character_id)->onQueue('public');
+            EveWhoMember::query()
+                ->where('character_id', (int) $member->character_id)
+                ->update(['esi_queued_at' => now()]);
 
             return true;
         } catch (\Throwable $exception) {

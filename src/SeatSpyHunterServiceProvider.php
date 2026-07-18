@@ -5,6 +5,7 @@ namespace Raikia\SeatSpyHunter;
 use Raikia\SeatSpyHunter\Console\Commands\RefreshIntelReports;
 use Raikia\SeatSpyHunter\Console\Commands\ProcessEveWhoQueue;
 use Raikia\SeatSpyHunter\Console\Commands\ProcessVpnLookupQueue;
+use Raikia\SeatSpyHunter\Console\Commands\QueueEveWhoMemberEsiRefresh;
 use Raikia\SeatSpyHunter\Database\Seeders\ScheduleSeeder;
 use Seat\Services\AbstractSeatPlugin;
 
@@ -75,6 +76,7 @@ class SeatSpyHunterServiceProvider extends AbstractSeatPlugin
             $this->commands([
                 ProcessEveWhoQueue::class,
                 ProcessVpnLookupQueue::class,
+                QueueEveWhoMemberEsiRefresh::class,
                 RefreshIntelReports::class,
             ]);
         }

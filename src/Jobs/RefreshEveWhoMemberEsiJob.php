@@ -13,8 +13,8 @@ use Raikia\SeatSpyHunter\Services\EveWhoService;
 class RefreshEveWhoMemberEsiJob implements ShouldQueue, ShouldBeUnique
 {
     const UNIQUE_ID = 'seat-spy-hunter:evewho-member-esi-refresh';
-    const DEFAULT_BATCH_SIZE = 25;
-    const DEFAULT_DELAY_SECONDS = 120;
+    const DEFAULT_BATCH_SIZE = 10;
+    const DEFAULT_DELAY_SECONDS = 300;
 
     use Dispatchable;
     use InteractsWithQueue;
